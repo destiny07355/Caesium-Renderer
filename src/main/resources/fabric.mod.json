@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "caesium",
+  "version": "${version}",
+  "icon": "assets/caesium/icon.png",
+
+  "name": "Caesium",
+  "description": "A client-side performance suite for Minecraft 1.21.11. Optimizes culling, chunk rebuild pacing, particles, animations and frame pacing, with a full categorized settings menu. Works alongside other performance mods.",
+  "authors": [
+    "Destiny073"
+  ],
+  "contact": {
+    "homepage": "https://github.com/Destiny073"
+  },
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "destiny.renderer.DestinyRenderer"
+    ]
+  },
+  "mixins": [
+    "caesium.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.18.0",
+    "minecraft": "~1.21.11",
+    "java": ">=25",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "lithium": "*",
+    "ferritecore": "*"
+  }
+}

@@ -1,0 +1,194 @@
+Architectural Specification and Implementation Blueprint for High-Performance Integrated Graphics Voxel Rendering
+
+Engine Architecture and Unified Memory Hardware Synergy
+Optimizing high-throughput voxel rendering engines on unified memory architecture (UMA) platforms, such as Intel UHD Graphics integrated GPUs, requires abandoning discrete GPU rendering assumptions. Integrated graphics processors lack dedicated high-speed VRAM; instead, execution units share system memory bandwidth with the host CPU. In traditional Java-based voxel engines, two distinct bottlenecks emerge: CPU pipeline stalls caused by runtime garbage collection (GC) pauses during chunk mesh creation, and GPU driver overhead resulting from thousands of redundant draw calls dispatched per frame.
+When a voxel engine submits draw calls individually for each 16 x 16 x 16 chunk section, the graphics driver spends more time processing state transitions and command buffer validation than the GPU hardware spends executing geometry shading. On UMA systems, frequent memory transfers between Java heap structures and native GPU buffers saturate the shared system bus, degrading rendering performance.
+To eliminate these bottlenecks, the DestinyRenderer framework introduces an integrated rendering architecture. The pipeline uses Java 22 Foreign Function & Memory (FFM) APIs alongside an off-heap Two-Level Segregated Fit (TLSF) memory allocator to eliminate runtime Java heap allocations during chunk construction. Draw call overhead is minimized by consolidating all visible chunk draws into a single GPU command buffer via Multi-Draw Indirect (glMultiDrawElementsIndirect). Furthermore, vertex buffer transfers bypass PCIe bus emulation overhead through persistently mapped zero-copy buffers (glMapBufferRange), allowing the integrated GPU to read vertex geometry directly from shared physical RAM.
+
+Architectural Component | Legacy Engine Implementation | DestinyRenderer Target Architecture | Target Hardware Impact (Intel UHD)
+--- | --- | --- | ---
+Buffer Allocation | On-heap byte arrays & sun.misc.Unsafe | Off-heap FFM MemorySegment & TLSF Allocator | Eliminates GC pauses; removes native-to-heap copy overhead.
+GPU Communication | Synchronous glBufferData re-allocation | Persistent zero-copy mapped buffers (glMapBufferRange) | Prevents bus saturation and driver synchronization stalls.
+Draw Execution | Iterative glDrawElements per chunk section | Persistent Multi-Draw Indirect (MDI) buffer execution | Reduces driver overhead from O(N) calls to O(1).
+Mesh Generation | Naive per-block face extraction | Greedy Quad Merging with bit-packed 64-bit vertices | Cuts vertex/index processing throughput by 40–60%.
+Resource Scheduling | Linear or row-major loading loops | 3D Euclidean spiral priority queue with upload budgets | Enforces <= 2.5 ms GPU upload cap to eliminate micro-stutters.
+
+Chunk Meshing Architecture and Spatial Priority Scheduling
+Topological Optimization via Greedy Quad Merging
+Naive voxel mesh generation extracts up to six independent quad faces per solid voxel, creating massive geometric redundancy across continuous terrain surfaces such as stone layers, water planes, and planar soil. Greedy Quad Merging simplifies coplanar voxel faces. The mesher evaluates slice planes across each 16 x 16 x 16 chunk section, identifying contiguous rectangular regions of faces that share identical material textures, lightmap coordinates, tint factors, and ambient occlusion parameters.
+Formally, given a 2D slice plane of faces F_{u,v} within a chunk section, the algorithm determines the maximal rectangular bounds of a quad Q = (u_0, v_0, w, h) such that for all u in [u_0, u_0 + w - 1] and v in [v_0, v_0 + h - 1], the visual and physical properties match P(F_{u,v}) = P(F_{u_0,v_0}).
+Instead of generating individual 1 x 1 unit quads, the mesher combines adjacent coplanar faces into a unified quad boundary. For a planar surface of 16 x 16 voxels, naive meshing produces 256 distinct quads comprising 1,024 vertices. Greedy Quad Merging compresses this entire surface into a single quad requiring only 4 vertices, representing a 98.4% vertex reduction for uniform planes. Across heterogeneous terrain, overall vertex and index counts drop by 40% to 60%, reducing geometry processing workloads on execution units. Vertices are packed into bit-packed 64-bit structures to maximize L2 cache utilization.
+
+Camera 3D Euclidean Spiral Priority Queue
+To prevent visual pop-in and ensure terrain immediately surrounding the player camera loads instantly, section meshing tasks are scheduled using a 3D Euclidean spiral priority queue. Rather than iterating through chunk coordinates in arbitrary grid order, the queue dynamically recalculates task priorities based on 3D distance vectors from the camera position (x_c, y_c, z_c).
+The priority metric P(s) for a section s located at section center coordinates (x_s, y_s, z_s) is defined by the 3D Euclidean distance formula:
+P(s) = sqrt((x_s - x_c)^2 + (y_s - y_c)^2 + (z_s - z_c)^2)
+Sections with the smallest P(s) values are sorted to the head of the meshing queue. When the player camera crosses a section boundary, a background task re-sorts active meshing jobs without stalling the main rendering loop.
+
+Frame-Budget Upload Throttling and Zero-Allocation Thread-Local Meshers
+While background worker threads build chunk meshes asynchronously, submitting mesh data to GPU memory must occur on the main execution thread. Unbounded GPU buffer uploads during fast player movement saturate the driver command queue, causing sudden frame-time spikes. DestinyRenderer enforces a strict frame-budget upload throttling cap (<= 2.5 ms per frame).
+During the upload phase, the upload manager queries high-resolution timers prior to transferring each pending chunk payload. If the cumulative upload time exceeds 2.5 ms, remaining uploads are deferred to subsequent frames, preserving stable frametimes.
+To prevent garbage collection pauses during mesh construction, the engine utilizes thread-local, reusable native off-heap staging buffers (ThreadLocal<MemorySegment>). Thread-local staging buffers resize dynamically to accommodate maximal chunk section geometry but are retained across meshing passes, eliminating heap allocations during voxel construction loops.
+
+GPU Batching, Multi-Draw Indirect, and Hierarchical Culling
+Multi-Draw Indirect (MDI) Command Buffer Architecture
+Traditional voxel engines render terrain by issuing individual draw calls per chunk section via glDrawElementsInstancedBaseVertex, incurring high driver translation overhead. Multi-Draw Indirect consolidates all visible chunk draw calls across the world into a single command array, executed through a single glMultiDrawElementsIndirect call.
+The indirect command buffer contains an array of tightly packed 20-byte C-compatible structures defined by DrawElementsIndirectCommand:
+Struct Field | Data Type | Bytes | Functional Description
+--- | --- | --- | ---
+count | uint32_t | 0–3 | Total number of indices to render for the section.
+instanceCount | uint32_t | 4–7 | Number of instances to render (fixed at 1 for static terrain).
+firstIndex | uint32_t | 8–11 | Index buffer byte offset divided by sizeof(GLuint).
+baseVertex | int32_t | 12–15 | Constant offset added to vertex index lookups.
+baseInstance | uint32_t | 16–19 | Base offset used for instanced attribute fetching.
+
+On Intel UHD Graphics drivers, strict alignment constraints must be satisfied to prevent GL_INVALID_OPERATION driver crashes. The indirect command buffer bound to GL_DRAW_INDIRECT_BUFFER must remain unmapped during glMultiDrawElementsIndirect execution, and index offsets (firstIndex) must align strictly to 4-byte boundaries.
+
+128³ Region Spatial Hierarchical Culling
+To reduce CPU frustum testing overhead, DestinyRenderer implements a two-tier bounding volume hierarchy. The world is partitioned into macro-regions spanning 128 x 128 x 128 blocks, corresponding to an 8 x 8 x 8 grid of chunk sections (512 individual sections per region).
+Prior to testing individual chunk section bounding boxes against the camera view frustum, the frustum tester evaluates the macro-region's axis-aligned bounding box (AABB). If a macro-region falls outside the active view frustum, all 512 constituent chunk sections are culled in a single check, skipping individual frustum evaluation loops.
+
+Translucency Sorting and Yarn 1.21.11 Mapping Synchronization
+Translucent surfaces (such as water and stained glass) require strict back-to-front sorting relative to camera position to ensure correct alpha blending. Continuous per-frame sorting of translucent quads creates unnecessary CPU load. DestinyRenderer defers translucency sorting until the camera crosses a chunk section boundary or changes its orientation vector by more than 45 degrees, eliminating redundant sorting passes.
+To maintain compatibility with Minecraft 1.21.11 under Fabric Yarn mappings, internal mixin descriptors targeting explosion exposure and terrain rendering must target updated method signatures. Modern Fabric API and Yarn mapping changes update intermediary names. The ExplosionOptimizationMixin target signature is explicitly bound as follows:
+Target Class | Yarn Mapped Method | Intermediary Descriptor | Optimization Function
+--- | --- | --- | ---
+Explosion | getExposure(Vec3d, Entity) | method_17752(Lnet/minecraft/class_243;Lnet/minecraft/class_1297;)F | Caches raycast exposure calculations to prevent frame drops during TNT explosions.
+WorldRenderer | render | method_22710 | Captures view matrices and replaces immediate rendering pipelines.
+ChunkBuilder | scheduleRebuild | method_22767 | Redirects non-urgent mesh rebuilding tasks to background priority pools.
+
+Off-Heap Native Memory Layout, TLSF Allocator, and Java 22 FFM Integration
+Two-Level Segregated Fit (TLSF) Allocator Mechanics
+Dynamic native memory allocation via standard C malloc or direct byte buffer instantiation introduces memory fragmentation and unpredictable execution latencies. DestinyRenderer integrates an off-heap Two-Level Segregated Fit (TLSF) memory allocator operating over a contiguous pre-allocated native memory block. TLSF guarantees bounded O(1) worst-case execution time for allocation and deallocation operations while keeping memory fragmentation below 15%.
+The TLSF allocator categorizes memory blocks using a two-level indexing scheme:
+First-Level Indexing (FLI): Segregates allocation requests by powers of two (e.g., 32, 64, 128, 256, ... bytes).
+Second-Level Indexing (SLI): Subdivides each power-of-two range linearly into 2^S equal sub-bins (typically S = 4 or S = 5, yielding 16 to 32 sub-ranges per FLI class).
+Bitmaps track non-empty free lists across FLI and SLI tiers. Locating a suitable free block relies on CPU hardware intrinsics (Find First Set / ffs and Find Last Set / fls), completing list searches in constant time.
+When chunks are unloaded or re-meshed, their allocated memory blocks are returned to the TLSF pool and coalesced with adjacent free blocks. The Free-List Slab Recycler reuses section slots without returning memory to the operating system, preventing native heap fragmentation.
+
+Java 22 Foreign Function & Memory (FFM) API Integration
+The Java Foreign Function & Memory API (JEP 454) provides high-performance off-heap memory access without the safety risks of sun.misc.Unsafe or the 2GB address limit and non-deterministic GC overhead of java.nio.ByteBuffer.
+Memory segments allocated via Arena.ofConfined() enforce thread confinement and deterministic lifecycle management. Closing the arena instantly releases backing native memory regions, preventing off-heap memory leaks.
+
+Zero-Copy Persistent Mapped Buffers on Integrated Architecture
+Because integrated GPUs share physical RAM with the CPU, copying vertex data from CPU-allocated native memory to GPU-dedicated VBOs over PCIe bus emulation introduces redundant memory transfers.
+DestinyRenderer implements a ZeroCopyIGPUBackend that maps GPU buffer objects directly into process memory space via glMapBufferRange using persistent and coherent flags:
+Mapping Flags = GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT
+The returned pointer is wrapped directly in an FFM MemorySegment. The CPU writes bit-packed vertex structures directly into this memory region. The integrated GPU reads the data directly from shared physical RAM without intermediate copies or explicit buffer flushes.
+
+Shader Pipeline Architecture and Scalable Visual Presets
+To ensure optimal performance on Intel UHD Graphics while maintaining visual quality, DestinyRenderer provides three visual graphics presets built using OpenGL 3.3 Core Profile (#version 330 core).
+Visual Feature | Performance Preset | Balanced Preset (Vanilla+) | Quality Preset
+--- | --- | --- | ---
+Diffuse Lighting | Flat face-normal diffuse | Directional vertex diffuse | Directional per-fragment diffuse
+Ambient Occlusion | Disabled (0% cost) | Smooth per-vertex AO | Smooth per-fragment AO / SSAO
+Atmospheric Fog | Fast linear distance fog | Exponential distance fog | Atmospheric scatter-mode fog
+Shadow Approximation | Standard lightmap sampling | Smooth lightmap interpolation | Soft contact shadow approximation
+Edge Anti-Aliasing | Disabled | Disabled | Fast Approximate Anti-Aliasing (FXAA)
+
+Visual Preset Processing Pipeline
+In the Performance Preset, the vertex shader computes flat diffuse lighting and fast linear distance fog, disabling ambient occlusion calculations to maximize rasterization speed. The fragment shader outputs direct texture colors combined with linear fog factors, minimizing arithmetic operations on execution units.
+In the Balanced Preset, smooth ambient occlusion is evaluated per-vertex during mesh construction and interpolated across quad surfaces. The shader pipeline calculates directional diffuse lighting and exponential distance fog, delivering enhanced visuals while maintaining high frame rates.
+In the Quality Preset, the engine enables per-fragment ambient occlusion and soft contact shadow approximations within the fragment shader. Post-processing includes single-pass Fast Approximate Anti-Aliasing (FXAA) to smooth high-contrast geometric edges.
+
+Fast Approximate Anti-Aliasing (FXAA) Mathematical Formulation
+The Quality preset uses a single-pass screen-space FXAA shader to smooth geometry edges. The algorithm measures spatial contrast across a 3 x 3 luminance neighborhood to detect sharp geometry boundaries.
+Luminance (L) is calculated from fragment RGB values using perceptual weights:
+L = 0.299 * R + 0.587 * G + 0.114 * B
+Local edge orientation (horizontal vs. vertical) is determined by comparing spatial contrast derivatives:
+C_h = 2 * |L_N + L_S - 2 * L_M| + |L_NE + L_SE - 2 * L_E| + |L_NW + L_SW - 2 * L_W|
+C_v = 2 * |L_E + L_W - 2 * L_M| + |L_NE + L_NW - 2 * L_N| + |L_SE + L_SW - 2 * L_S|
+If C_h >= C_v, the detected edge is horizontal; otherwise, it is vertical. The shader then samples along the orthogonal edge vector, applying sub-pixel offsets to smooth pixel aliasing along geometry boundaries without blurring surface textures.
+
+Dynamic Entity, Particle, and PvP Synchronization Pipeline
+Instanced Mob Model Rendering
+Vanilla entity rendering processes each mob entity via individual draw calls, binding distinct model textures and passing transformation matrices sequentially. This approach saturates CPU resources when hundreds of entities are visible within the camera view frustum.
+DestinyRenderer converts identical mob model geometries into batched instanced draw calls (glDrawElementsInstancedBaseVertexBaseInstance). Instance buffers store per-entity transformation matrices, custom tint factors, and lightmap coordinates. This batches identical mob model types into single draw calls, increasing frame rates up to 3.9x in entity-heavy environments.
+
+Particle VBO Type-Pooling
+Particles generate severe render-state thrashing due to continuous allocation, short lifespans, and varying texture atlas dependencies. The particle subsystem uses a type-pooled VBO structure:
+Active particles are grouped by texture atlas page and blend mode.
+Vertex attribute data (position, UV, color, light) are written into a unified pooled native stream buffer managed by an FFM memory segment.
+The buffer is uploaded to the GPU in a single glBufferSubData pass per particle material type, eliminating allocation overhead and reducing draw calls.
+
+Frame-Start Upload Synchronization for PvP Gameplay
+During fast-paced PvP movement, directional changes and player camera rotations occur rapidly. If GPU buffer uploads occur mid-frame or late in the rendering pipeline, world state and camera projection matrices desynchronize, causing visual jitter or missed hits.
+DestinyRenderer hooks the start of the frame (beginFrame) inside DestinyRenderer.java. Pending chunk geometry uploads and entity instance buffer updates execute prior to processing camera updates and input polling. This synchronization guarantees that rendered state matches camera calculations, eliminating input lag and visual jitter during rapid PvP movement.
+
+System Component Mapping and Maintenance Blueprint
+Refactoring the DestinyRenderer codebase requires specific updates across all core packages:
+Component File Path | Module Role & Description | Architectural Status & Action Item
+--- | --- | ---
+destiny.renderer.DestinyRenderer | Engine entrypoint, lifecycle, and F3+A reload handler. | MODIFY: Connect beginFrame synchronization pass to flush uploads before camera matrix calculations.
+destiny.renderer.mixin.WorldRendererMixin | Hooks WorldRenderer.render() and block layers. | MODIFY: Intercept terrain rendering, pass camera matrices to MDI engine, and bypass vanilla pipelines cleanly.
+destiny.renderer.mixin.ChunkBuilderMixin | Hooks chunk rebuild scheduling (scheduleRebuild). | MAINTAIN: Route urgent updates to vanilla fallback and background rebuilds to the priority queue.
+destiny.renderer.mixin.ExplosionOptimizationMixin | TNT raycast and exposure optimization. | MODIFY: Remap target descriptor to exact Yarn 1.21.11 getExposure method signature.
+destiny.renderer.mixin.GameRendererMixin | Hooks view frustum setup. | MAINTAIN: Supply live projection matrices to spatial frustum culling modules.
+destiny.renderer.mixin.FireCommandRendererMixin | Instanced fire geometry renderer. | MAINTAIN: Retain instanced fire render path.
+destiny.renderer.mixin.MultiBufferSourceMixin | Batched immediate-mode entity source. | MAINTAIN: Retain batched source hooks.
+destiny.renderer.chunk.ChunkMesher | Converts block data to bit-packed quads. | MODIFY: Implement Greedy Quad Merging to merge coplanar adjacent faces.
+destiny.renderer.chunk.MeshingJobSystem | Thread pool managing chunk meshing. | MODIFY: Enforce <= 2.5 ms per-frame upload throttle and evict old GPU allocations.
+destiny.renderer.chunk.ChunkSectionData | 18 x 18 x 18 padded block state storage. | MAINTAIN: Retain Structure-of-Arrays data layout.
+destiny.renderer.chunk.PackedVertexFormat | Bit-packing format for 64-bit vertices. | MAINTAIN: Retain compact 64-bit vertex bit packing.
+destiny.renderer.chunk.AmbientOcclusionCalculator | Per-vertex AO lighting evaluator. | MODIFY: Add runtime toggles switching between vertex AO and per-fragment AO shaders.
+destiny.renderer.chunk.TranslucencySorter | Back-to-front sorter for glass/water quads. | MODIFY: Defer sorting until camera crosses section boundaries or changes quadrant vectors.
+destiny.renderer.chunk.MortonEncoder | 3D Z-order curve coordinate indexing. | MAINTAIN: Retain Morton spatial indexing.
+destiny.renderer.render.MDIRenderBackend | Multi-Draw Indirect rendering backend. | MODIFY: Integrate 128^3 regional frustum culling and TLSF allocation recycling.
+destiny.renderer.render.ComputeCullShader | GPU compute shader frustum culling. | MAINTAIN: Fallback gracefully to SIMD CPU culling on integrated GPU platforms lacking compute resources.
+destiny.renderer.render.HiZDepthPyramid | Hierarchical Z-Buffer occlusion testing. | MAINTAIN: Retain secondary occlusion culling pass.
+destiny.renderer.render.IndirectCommandBuffer | Wrapper for indirect command arrays. | MAINTAIN: Retain reusable indirect command buffer wrapper.
+destiny.renderer.render.EntityBatchRenderer | Mob and entity batching engine. | MODIFY: Add instanced mob model batching (glDrawElementsInstancedBaseVertexBaseInstance).
+destiny.renderer.render.ZeroCopyIGPUBackend | Zero-copy mapped buffer backend. | MAINTAIN: Retain persistent zero-copy mapped buffer architecture.
+destiny.renderer.render.ShaderPresetManager | Shader Quality Preset Manager. | NEW FILE: Implement runtime switching across Performance, Balanced, and Quality presets.
+destiny.renderer.memory.TLSFAllocator | Two-Level Segregated Fit allocator. | MODIFY: Implement Free-List Slab Recycler for immediate chunk section slot reuse.
+destiny.renderer.memory.GpuBuffer | FFM native off-heap memory wrapper. | MAINTAIN: Retain safe native memory scope handling via Java 22 FFM API.
+destiny.renderer.memory.RendererArenaManager | Temporary memory arena manager. | MAINTAIN: Retain per-frame arena flushing.
+destiny.renderer.config.RendererConfigScreen | Custom GUI options configuration screen. | MODIFY: Add Visual Presets selector, upload budget controls, and greedy meshing toggles.
+destiny.renderer.config.RendererConfig | Config JSON serialization handler. | MODIFY: Add serialization fields for new shader presets and meshing toggles.
+destiny.renderer.compat.DynamicCompatibilityManager | External mod compatibility delegate. | MAINTAIN: Retain dynamic detection for Sodium, Iris, and EntityCulling.
+
+Conclusions and Architectural Implementation Summary
+By combining topological geometry compression, multi-draw indirect rendering, off-heap native memory allocation, and frame-synchronized GPU uploads, DestinyRenderer addresses the main hardware bottlenecks associated with rendering voxel graphics on integrated GPU architectures.
+Implementing this architecture provides three primary technical optimizations:
+1. Zero Runtime Java Heap Allocations: All meshing staging and buffer mapping operations occur off-heap using Java 22 FFM MemorySegment native buffers, eliminating Garbage Collection frame-time spikes.
+2. Stable Frame Delivery (<= 2.5 ms Upload Cap): Capping per-frame GPU upload times ensures smooth frame delivery even during high-speed world generation.
+3. Minimized Driver Overhead: Multi-Draw Indirect reduces CPU-to-GPU state validation overhead, maximizing execution unit efficiency on Intel UHD graphics platforms.
+
+Works cited
+1. glMultiDrawElementsIndirect is slow - opengl - Stack Overflow, https://stackoverflow.com/questions/43646127/glmultidrawelementsindirect-is-slow
+2. OpenGL glMultiDrawElementsIndirect crash on integrated intel GPU - Khronos Forums, https://community.khronos.org/t/opengl-glmultidrawelementsindirect-crash-on-integrated-intel-gpu/111444
+3. GPU memory management in AnKi - AnKi 3D Engine Dev Blog, https://anki3d.org/gpu-memory-management-in-anki/
+4. Memory Management in Vkd - Arthur Vasseur's Blog, https://arthurvasseur.fr/blog/vkd-memory-management/
+5. A Comprehensive Guide to Java's Foreign Function & Memory API in IBM Semeru Runtime, https://community.ibm.com/community/user/blogs/dhruv-chopra/2026/03/20/a-comprehensive-guide-to-javas-foreign-function-me
+6. Meshing in a Minecraft Game - 0 FPS, https://0fps.net/2012/06/30/meshing-in-a-minecraft-game/
+7. glDrawElementsIndirect - OpenGL ES 3 - docs.gl, https://docs.gl/es3/glDrawElementsIndirect
+8. OpenGL glMultiDrawElementsIndirect with Interleaved Buffers - Stack Overflow, https://stackoverflow.com/questions/34302409/opengl-glmultidrawelementsindirect-with-interleaved-buffers
+9. ImmediatelyFast - Minecraft Mod - Modrinth, https://modrinth.com/mod/immediatelyfast
+10. Minecraft speed for loading chunks - Stack Overflow, https://stackoverflow.com/questions/55681161/minecraft-speed-for-loading-chunks
+11. Java Foreign Function & Memory API (Project Panama) | by Kaustubh Saha - Medium, https://medium.com/@kaustubh.saha/java-foreign-function-memory-api-project-panama-ebbc29f5daaf
+12. Foreign Function and Memory API in Java - Baeldung, https://www.baeldung.com/java-foreign-memory-access
+13. TLSF: Memory allocator real time embedded systems, http://www.gii.upv.es/tlsf/
+14. Foreign Function and Memory API — Project Panama Explained - Trinity Logic, https://www.trinitylogic.co.uk/blog/java-foreign-function-memory-api-panama/
+15. glMultiDrawElementsIndirect custom drawID with multiple instances per DrawElementsIndirectCommand - Stack Overflow, https://stackoverflow.com/questions/53460871/glmultidrawelementsindirect-custom-drawid-with-multiple-instances-per-drawelemen
+16. "Use compact vertex format" causes severe flickering with iron bars · Issue #460 · CaffeineMC/sodium - GitHub, https://github.com/CaffeineMC/sodium/issues/460
+17. Methods for Efficient Chunk Loading? : r/VoxelGameDev - Reddit, https://www.reddit.com/r/VoxelGameDev/comments/1qd8rn0/methods_for_efficient_chunk_loading/
+18. multithreading - Loading chunks around center - Software Engineering Stack Exchange, https://softwareengineering.stackexchange.com/questions/201176/loading-chunks-around-center
+19. Chunk Loading Logic : r/Minecraft - Reddit, https://www.reddit.com/r/Minecraft/comments/rmxbu/chunk_loading_logic/
+20. WorldRenderer (yarn 1.21.11+build.4 API) - Fabric, https://maven.fabricmc.net/docs/yarn-1.21.11+build.4/net/minecraft/client/render/WorldRenderer.html
+21. [Solved] glMultiDrawElementsIndirect fails, only on one GPU - NVIDIA Developer Forums, https://forums.developer.nvidia.com/t/solved-glmultidrawelementsindirect-fails-only-on-one-gpu/284882
+22. Explosion (yarn 1.21.11+build.1 API) - Fabric, https://maven.fabricmc.net/docs/yarn-1.21.11+build.1/net/minecraft/world/explosion/Explosion.html
+23. Explosion (yarn API) - Fabric, https://maven.fabricmc.net/docs/yarn-20w51a+build.9/net/minecraft/world/explosion/Explosion.html
+24. Explosion (yarn 1.17-pre1+build.1 API) - Fabric, https://maven.fabricmc.net/docs/yarn-1.17-pre1+build.1/net/minecraft/world/explosion/Explosion.html
+25. Fabric for Minecraft 1.21.11, https://fabricmc.net/2025/12/05/12111.html
+26. TLSF: a New Dynamic Memory Allocator for Real-Time Systems - UPV, http://www.gii.upv.es/tlsf/files/papers/ecrts04_tlsf.pdf
+27. mattconte/tlsf: Two-Level Segregated Fit memory allocator implementation. - GitHub, https://github.com/mattconte/tlsf
+28. JEP 454: Foreign Function & Memory API - OpenJDK, https://openjdk.org/jeps/454
+29. skills/skills/shader-dev/reference/ambient-occlusion.md at main · MiniMax-AI/skills - GitHub, https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/reference/ambient-occlusion.md?plain=1
+30. Switching your shaders to OpenGL Core Profile | Adobe Substance 3D Designer, https://experienceleague.adobe.com/en/docs/substance-3d-designer/using/workspace/3d-view/deprecated/switching-your-shaders-to-opengl-core-profile
+31. SSAO - LearnOpenGL, https://learnopengl.com/Advanced-Lighting/SSAO
+32. FXAA Shader Issues / Anti-aliasing : r/opengl - Reddit, https://www.reddit.com/r/opengl/comments/1cx6mh3/fxaa_shader_issues_antialiasing/
+33. FXAA - Catlike Coding, https://catlikecoding.com/unity/tutorials/advanced-rendering/fxaa/
+34. mattdesl/glsl-fxaa: FXAA implementation for glslify in WebGL - GitHub, https://github.com/mattdesl/glsl-fxaa
+35. Clarifying how Particle systems use Instancing and Dynamic Batching - Unity Discussions, https://discussions.unity.com/t/clarifying-how-particle-systems-use-instancing-and-dynamic-batching/743337
+36. Boost Your Unity Game Speed With Powerful GPU Instancing And Batching - YouTube, https://www.youtube.com/watch?v=vm95z0PwGD4
+37. ExplosionLargeParticle (yarn 1.21.11+build.3 API) - Fabric, https://maven.fabricmc.net/docs/yarn-1.21.11+build.3/net/minecraft/client/particle/ExplosionLargeParticle.html
