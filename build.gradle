@@ -1,0 +1,282 @@
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral() // LWJGL test bindings for the headless GL exit test
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+
+// Headless GL exit test (Month 1): LWJGL for a hidden window + GL 3.3 core context.
+    // Versions match the LWJGL bundles Minecraft ships; the engine has zero game imports.
+    testImplementation "org.lwjgl:lwjgl:3.3.3"
+    testImplementation "org.lwjgl:lwjgl-opengl:3.3.3"
+    testRuntimeOnly "org.lwjgl:lwjgl:3.3.3:natives-windows"
+    testRuntimeOnly "org.lwjgl:lwjgl-opengl:3.3.3:natives-windows"
+
+    // LWJGL GLFW on the main classpath: the Vulkan window target (SwapchainTarget) creates
+    // the surface via GLFWVulkan.glfwCreateWindowSurface, so GLFW bindings are part of the
+    // engine, not just the test source set. Minecraft ships the same 3.3.3 natives at runtime.
+    implementation "org.lwjgl:lwjgl:3.3.3"
+    implementation "org.lwjgl:lwjgl-glfw:3.3.3"
+    runtimeOnly "org.lwjgl:lwjgl:3.3.3:natives-windows"
+    runtimeOnly "org.lwjgl:lwjgl-glfw:3.3.3:natives-windows"
+
+    // Vulkan backend (Month 2, primary): LWJGL Vulkan bindings (loader comes from the
+    // system Vulkan runtime, so no natives artifact) + shaderc to compile GLSL -> SPIR-V
+    // at runtime. These ride in the compile/runtime classpath because the Vulkan backend
+    // is part of caesium.engine; the rest of the engine stays free of LWJGL imports.
+    implementation "org.lwjgl:lwjgl-vulkan:3.3.3"
+    implementation "org.lwjgl:lwjgl-shaderc:3.3.3"
+    runtimeOnly "org.lwjgl:lwjgl-shaderc:3.3.3:natives-windows"
+}
+
+processResources {
+    inputs.property "version", project.version
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Java target
+// -----------------------------------------------------------------------------
+// This build targets Java 25.
+//
+// The terrain pipeline uses the Foreign Function & Memory API (MemorySegment, Arena).
+// FFM was a *preview* feature in Java 21 and only became final in Java 22, so compiling
+// this source set for 21 would require --enable-preview — and preview bytecode is
+// version-locked, meaning a 21-preview jar refuses to load on 22+. Targeting 25 keeps
+// the bytecode portable across 22-25 with no launch flags.
+//
+// A separate Java 21 variant is planned; it will need the FFM-dependent terrain classes
+// replaced with a ByteBuffer-based path rather than simply lowering the release version.
+// See docs/ARCHITECTURE.md.
+def javaTarget = 25
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(javaTarget)
+    }
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = javaTarget
+    it.options.encoding = "UTF-8"
+}
+
+// Dev run JVM arguments for ZGC, FFM API, and Vector API
+def sharedJvmArgs = [
+    '-XX:+UseZGC',
+    '-XX:+AlwaysPreTouch',
+    '--enable-native-access=ALL-UNNAMED',
+    '--add-modules=jdk.incubator.vector',
+    '-Xms4G',
+    '-Xmx4G',
+    '-XX:+UnlockDiagnosticVMOptions',
+    '-XX:+DisableExplicitGC'
+]
+
+loom {
+    runs {
+        client {
+            vmArgs sharedJvmArgs
+            if (project.hasProperty('benchmark')) {
+                vmArg "-Ddestiny.benchmark=true"
+                programArgs "--quickPlaySingleplayer", "New World"
+            }
+        }
+        server {
+            vmArgs sharedJvmArgs
+        }
+    }
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.archives_base_name}" }
+    }
+    // Commercial release: strip development test frameworks and internal benchmark tools
+    exclude "destiny/renderer/bench/**"
+    exclude "caesium/engine/debug/**"
+}
+
+tasks.register('buildPrivateJar', Copy) {
+    dependsOn 'remapJar'
+    from layout.buildDirectory.file("libs/Caesium-${project.mod_version}.jar")
+    into layout.buildDirectory.dir("libs")
+    rename { "Caesium-x${project.mod_version}.jar" }
+}
+
+// Headless GL exit test (Month 1): boots a hidden GLFW window with a GL 3.3 core context
+// and renders the engine's TestQuadPass through the render graph, asserting pixel readback.
+tasks.register('headlessGlTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the engine\'s test quad on a hidden GL 3.3 context and checks the framebuffer.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.gl.HeadlessGlTest'
+    systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
+    jvmArgs '-Djava.awt.headless=true'
+    maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+// Headless Vulkan exit test (Month 2): runs the same quad on the Vulkan backend and reads
+// a pixel back from the offscreen target. Skips cleanly (exit 0) when the driver has no
+// Vulkan support — that machine falls back to OpenGL, which is the designed behaviour.
+tasks.register('headlessVulkanTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the engine\'s test quad on the Vulkan backend and checks the offscreen target.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.vulkan.HeadlessVulkanTest'
+    systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
+    jvmArgs '-Djava.awt.headless=true'
+    maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+// Headless Vulkan swapchain exit test (Month 2): attaches a hidden GLFW window and runs the
+// quad through acquire -> render -> present over several frames, then reads the presented
+// image back. Skips cleanly (exit 0) when Vulkan or a window surface is unavailable.
+tasks.register('headlessVulkanSwapchainTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the engine\'s test quad through the swapchain/present path on a hidden window.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.vulkan.HeadlessVulkanSwapchainTest'
+    systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
+    jvmArgs '-Djava.awt.headless=true'
+    maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+// Headless UBO + GPU-timing tests (Month 2): bind a tinted uniform block and record GPU
+// timestamps around a draw on each backend, then read the pixel back and check the timer.
+tasks.register('headlessUboTimerGlTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the UboTimerPass on a hidden GL 3.3 context, checking UBO tint and GPU timer.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.gl.HeadlessUboTimerGlTest'
+    systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
+    jvmArgs '-Djava.awt.headless=true'
+    maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('headlessUboTimerVulkanTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the UboTimerPass on the Vulkan backend, checking UBO tint and GPU timer.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.vulkan.HeadlessUboTimerVulkanTest'
+    systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
+    jvmArgs '-Djava.awt.headless=true'
+    maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+// Headless terrain tests (Month 2 milestone): render a synthetic colored-cube section mesh
+// through the 3D pipeline + camera MVP on each backend and read back the center pixel.
+tasks.register('headlessTerrainGlTest', JavaExec) {
+    group = 'verification'
+    description = 'Renders a colored-cube section mesh with a camera on a hidden GL 3.3 context.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.gl.HeadlessTerrainGlTest'
+    systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
+    jvmArgs '-Djava.awt.headless=true'
+    maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('headlessTerrainVulkanTest', JavaExec) {
+    group = 'verification'
+    description = 'Renders a colored-cube section mesh with a camera on the Vulkan backend.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.vulkan.HeadlessTerrainVulkanTest'
+    systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
+    jvmArgs '-Djava.awt.headless=true'
+    maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('benchmarkMesher', JavaExec) {
+    group = 'verification'
+    description = 'Runs the standalone greedy chunk mesher benchmark.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.chunk.ChunkMesherBenchmarkTest'
+    jvmArgs sharedJvmArgs
+    maxHeapSize = '2g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('benchmarkPipeline', JavaExec) {
+    group = 'verification'
+    description = 'Runs the comprehensive multi-subsystem engine pipeline benchmark suite.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.bench.EnginePipelineBenchmarkTest'
+    jvmArgs sharedJvmArgs
+    maxHeapSize = '2g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('benchmarkParticles', JavaExec) {
+    group = 'verification'
+    description = 'Runs the dedicated 10,000 particle spawn benchmark.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.bench.CaesiumParticleBenchmarkTest'
+    jvmArgs sharedJvmArgs
+    maxHeapSize = '2g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('benchmarkParticleStress', JavaExec) {
+    group = 'verification'
+    description = 'Runs the multi-scale particle stress test suite (100 to 100k particles across scenarios).'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.bench.ParticleStressBenchmarkTest'
+    jvmArgs sharedJvmArgs
+    maxHeapSize = '2g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('benchmarkHardware', JavaExec) {
+    group = 'verification'
+    description = 'Runs the multi-tier hardware benchmark harness (iGPU, mid-range, high-end).'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.bench.HardwareBenchmarkHarness'
+    jvmArgs sharedJvmArgs
+    maxHeapSize = '2g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+test {
+    // The test source set is driven by the headlessGlTest JavaExec task, not JUnit.
+    failOnNoDiscoveredTests = false
+}
+
+publishing {
+    publications {
+        create("mavenJava", MavenPublication) {
+            artifactId = project.archives_base_name
+            from components.java
+        }
+    }
+}
+
+tasks.register('printTestClasspath') {
+    doLast {
+        println sourceSets.test.runtimeClasspath.asPath
+    }
+}

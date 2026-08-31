@@ -1,0 +1,36 @@
+{
+  "required": true,
+  "package": "destiny.renderer.mixin",
+  "compatibilityLevel": "JAVA_22",
+  "client": [
+    "BlockEntityCullMixin",
+    "ChatCompactMixin",
+    "ChunkBuilderMixin",
+    "ChunkUpdateThrottleMixin",
+    "DarknessEffectFogMixin",
+    "DebugHudMixin",
+    "EntityOutlineMixin",
+    "EntityRendererMixin",
+    "ExplosionOptimizationMixin",
+    "FireRenderOptimizationMixin",
+    "FluidRenderOptimizationMixin",
+    "GroundFireCullMixin",
+    "GameRendererMixin",
+    "HudOptimizationMixin",
+    "InactivityFpsMixin",
+    "InGameHudMixin",
+    "LightFlickerMixin",
+    "LightmapGammaMixin",
+    "OverlayRendererMixin",
+    "ParticleOptimizationMixin",
+    "ScreenEffectMixin",
+    "SpriteAnimatorTickMixin",
+    "SpriteContentsAnimationMixin",
+    "VideoOptionsScreenMixin",
+    "WorldRenderFeatureMixin",
+    "WorldRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
