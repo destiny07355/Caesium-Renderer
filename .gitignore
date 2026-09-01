@@ -1,6 +1,28 @@
+# Gradle
 .gradle/
 build/
-out/
+
+# IDE
 .idea/
 *.iml
+out/
+
+# Minecraft development runtime
 run/
+
+# Logs
+logs/
+*.log
+run_log2.txt
+
+# Benchmark generated output
+benchmark_results.json
+benchmark_report.txt
+benchmark_graph.png
+
+# Local/development files
+*.tmp
+*.bak
+
+# Personal
+.agents/
