@@ -25,8 +25,8 @@ public final class CaesiumTheme {
     // Change these to make panels more or less frosted/transparent.
     // =========================================================================
 
-    public static int BG_SCREEN_ALPHA    = 0xCC; // Full-screen vignette overlay
-    public static int BG_SIDEBAR_ALPHA   = 0xCC; // Left sidebar panel
+    public static int BG_SCREEN_ALPHA    = 0xFF; // Full-screen solid backdrop (100% blocks world/chat/hotbar)
+    public static int BG_SIDEBAR_ALPHA   = 0xF0; // Left sidebar panel
     public static int BG_CONTENT_ALPHA   = 0xBB; // Main content area panel (darker = deeper feel)
     public static int BG_ELEVATED_ALPHA  = 0xD0; // Raised control surfaces (checkboxes, sliders)
     public static int BG_HOVER_ALPHA     = 0x28; // Row hover wash (white overlay)

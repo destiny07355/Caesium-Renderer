@@ -72,6 +72,12 @@ public abstract class ChunkUpdateThrottleMixin {
         if (radius <= 0) return false;
         net.minecraft.client.MinecraftClient mc = net.minecraft.client.MinecraftClient.getInstance();
         if (mc == null || mc.player == null) return false;
+
+        // When flying fast with an Elytra or creative flight, expand the immediate rebuild cone/radius
+        if (mc.player.isGliding() || mc.player.getAbilities().flying) {
+            radius = Math.max(radius, 48);
+        }
+
         net.minecraft.util.math.BlockPos origin = this.getOrigin();
         if (origin == null) return false;
         double dx = origin.getX() + 8.0 - mc.player.getX();

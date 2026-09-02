@@ -110,12 +110,15 @@ public final class DestinyRenderer implements ClientModInitializer {
             KeyBinding.Category.MISC
         ));
 
-        // Register screen event for config key handling
+        // Register screen event for config key handling and safe deferred chunk processing
         net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register(client -> {
             while (configKey.wasPressed()) {
                 if (client.currentScreen == null) {
                     client.setScreen(new destiny.renderer.gui.DestinySettingsScreen(null));
                 }
+            }
+            if (client.world != null) {
+                destiny.renderer.chunk.DeferredRebuildQueue.processFrame();
             }
         });
 

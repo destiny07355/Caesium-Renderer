@@ -76,11 +76,11 @@ public final class SpriteAnimationController {
     }
 
     private static int categoryOf(String path) {
-        if (path.contains("/fire_") || path.endsWith("/fire") || path.contains("/soul_fire")) return SpriteVisibilityTracker.CAT_FIRE;
-        if (path.contains("/water_flow") || path.contains("/water_still")) return SpriteVisibilityTracker.CAT_WATER;
-        if (path.contains("/lava_flow") || path.contains("/lava_still")) return SpriteVisibilityTracker.CAT_LAVA;
+        if (path.contains("fire") || path.contains("flame") || path.contains("campfire")) return SpriteVisibilityTracker.CAT_FIRE;
+        if (path.contains("water")) return SpriteVisibilityTracker.CAT_WATER;
+        if (path.contains("lava")) return SpriteVisibilityTracker.CAT_LAVA;
         if (path.contains("portal")) return SpriteVisibilityTracker.CAT_PORTAL;
-        if (path.contains("sculk_sensor")) return SpriteVisibilityTracker.CAT_SCULK;
+        if (path.contains("sculk")) return SpriteVisibilityTracker.CAT_SCULK;
         return 0;
     }
 

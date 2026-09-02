@@ -654,8 +654,23 @@ public final class OptionRegistry {
                 .keywords("hearts", "armor", "food", "mount", "air"))
             .build();
 
+        OptionGroup notifications = OptionGroup.builder().title("Toasts & Notifications")
+            .add(bool("toast_all", "All Toast Notifications",
+                "Master switch for in-game toast notifications.", Impact.LOW,
+                () -> c.enableAllToasts, v -> c.enableAllToasts = v, true)
+                .keywords("toast", "notification", "popup"))
+            .add(bool("toast_advancements", "Advancement Toasts",
+                "Popups for unlocked advancements and recipes.", Impact.NONE,
+                () -> c.enableAdvancementToasts, v -> c.enableAdvancementToasts = v, true)
+                .enabledWhen(() -> c.enableAllToasts, "Enable All Toast Notifications to control this."))
+            .add(bool("toast_tutorials", "Tutorial Toasts",
+                "Popups for movement, recipe and tutorial hints.", Impact.NONE,
+                () -> c.enableTutorialToasts, v -> c.enableTutorialToasts = v, true)
+                .enabledWhen(() -> c.enableAllToasts, "Enable All Toast Notifications to control this."))
+            .build();
+
         return new OptionPage("details", Text.literal("Details"),
-            List.of(sky, world, overlays, hud));
+            List.of(sky, world, overlays, hud, notifications));
     }
 
     // ------------------------------------------------------------- Animations
@@ -748,6 +763,10 @@ public final class OptionRegistry {
             .build();
 
         OptionGroup perfGroup = OptionGroup.builder().title("Performance")
+            .add(bool("disable_all_particles", "Disable All Particles",
+                "Completely disable all particles and simulation calculations for extreme performance.", Impact.EXTREME,
+                () -> c.disableAllParticles, v -> c.disableAllParticles = v, false)
+                .keywords("particles", "disable", "all", "off", "kill"))
             .add(intOpt("max_particles_limit", "Maximum Particles",
                 "Upper bound on active particle population.", Impact.HIGH,
                 () -> c.maxParticleCount, v -> c.maxParticleCount = v, 500,

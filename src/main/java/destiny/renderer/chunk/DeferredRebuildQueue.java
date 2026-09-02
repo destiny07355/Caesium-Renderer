@@ -233,6 +233,11 @@ public final class DeferredRebuildQueue {
                         }
                     }
                 }
+                // Flight / fast movement: prune trailing sections that fell far behind camera
+                if (mc.player != null && (mc.player.isGliding() || mc.player.getAbilities().flying) && pending.size() > 48) {
+                    pruneTrailingSections(mc.player);
+                }
+
                 lastPlayerX = mc.player.getX();
                 lastPlayerY = mc.player.getY();
                 lastPlayerZ = mc.player.getZ();
@@ -248,33 +253,48 @@ public final class DeferredRebuildQueue {
         runSecondSliceIfHeadroom(stillPending, frameLong, base);
     }
 
-    /**
-     * Computes the per-frame budget before any slice runs (B3).
-     *
-     * <ul>
-     *   <li>Scales with the size of the backlog. A small backlog drains at the configured
-     *       rate; a large one (a cave system suddenly exposed by a blast) drains faster so
-     *       it does not take many seconds to catch up, but still never in a single frame.
-     *       The first tier is deliberately low: sustained movement across new chunks keeps
-     *       a constant trickle of fresh sections arriving, and that trickle must drain at
-     *       a healthy rate or the world visibly lags behind the camera.</li>
-     *   <li>Caps the burst on integrated GPUs: they share system memory with the CPU, so
-     *       every mesh upload competes for the same bandwidth the renderer is already
-     *       using to read vertex data. Pushing a large batch in one frame saturates that
-     *       bus and produces exactly the pacing spikes this queue exists to prevent.</li>
-     *   <li>Adaptive shrink on struggling frames (1.11.0 / R2): keyed to the live p99.5
-     *       frame time rather than the rolling average, because the average smooths
-     *       stutters away — the wrong signal for a subsystem whose whole job is the 1%
-     *       low. When p99.5 is above 2x the target the worst frames are genuinely painful
-     *       and we halve the budget; a live-late frame quarters it on top of that.</li>
-     * </ul>
-     */
+    /** Prunes sections far behind the player's look/flight vector so the CPU doesn't stall on trailing terrain. */
+    private static void pruneTrailingSections(net.minecraft.client.network.ClientPlayerEntity player) {
+        try {
+            double px = player.getX(), py = player.getY(), pz = player.getZ();
+            net.minecraft.util.math.Vec3d look = player.getRotationVecClient();
+            if (look == null) return;
+
+            synchronized (DeferredRebuildQueue.class) {
+                java.util.Iterator<Entry> it = pending.iterator();
+                while (it.hasNext()) {
+                    Entry e = it.next();
+                    if (e == null || e.chunk == null) continue;
+                    BlockPos origin = e.chunk.getOrigin();
+                    if (origin == null) continue;
+                    double dx = origin.getX() + 8.0 - px;
+                    double dy = origin.getY() + 8.0 - py;
+                    double dz = origin.getZ() + 8.0 - pz;
+                    double distSq = dx * dx + dy * dy + dz * dz;
+                    // If farther than 96 blocks and behind the flight direction
+                    if (distSq > 96.0 * 96.0) {
+                        double dot = dx * look.x + dy * look.y + dz * look.z;
+                        if (dot < -0.2) {
+                            queued.remove(e.chunk);
+                            it.remove();
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private static int computeBudget(boolean frameLong) {
         int backlog = size();
         int base = Math.max(1, RendererConfig.get().maxChunkUpdatesPerFrame);
         if (backlog > 512)      base *= 4;
         else if (backlog > 128) base *= 3;
         else if (backlog > 16)  base *= 2;
+
+        var mc = MinecraftClient.getInstance();
+        if (mc != null && mc.player != null && (mc.player.isGliding() || mc.player.getAbilities().flying)) {
+            base = Math.max(base, 8);
+        }
 
         if (destiny.renderer.hardware.HardwareCapabilityDetector.isDetected()
             && destiny.renderer.hardware.HardwareCapabilityDetector.getProfile() != null

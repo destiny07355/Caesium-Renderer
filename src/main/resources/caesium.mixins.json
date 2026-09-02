@@ -26,6 +26,7 @@
     "ScreenEffectMixin",
     "SpriteAnimatorTickMixin",
     "SpriteContentsAnimationMixin",
+    "ToastManagerMixin",
     "VideoOptionsScreenMixin",
     "WorldRenderFeatureMixin",
     "WorldRendererMixin"

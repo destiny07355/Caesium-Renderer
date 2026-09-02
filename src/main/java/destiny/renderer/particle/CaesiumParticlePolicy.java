@@ -59,7 +59,7 @@ public final class CaesiumParticlePolicy {
         }
 
         if (cfg.disableAllParticles) {
-            return GAMEPLAY_CRITICAL.contains(type);
+            return false;
         }
 
         if (!ParticleClassifier.isEnabled(effect, cfg)) {

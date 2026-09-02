@@ -415,6 +415,11 @@ public final class RendererConfig {
     /** Distance beyond which particles are not spawned at all, in blocks. */
     public int particleCullDistance = 48;
 
+    // --- Toast / Notification toggles ---
+    public boolean enableAllToasts = true;
+    public boolean enableAdvancementToasts = true;
+    public boolean enableTutorialToasts = true;
+
     // -------------------------------------------------------------------------
     // Targeted render optimizations
     // -------------------------------------------------------------------------
