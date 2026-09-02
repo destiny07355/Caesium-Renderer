@@ -1331,33 +1331,55 @@ public final class OptionRegistry {
                 javaStr))
             .build();
 
-        OptionGroup recommendations = OptionGroup.builder().title("Recommendations")
-            .add(new Option<>("jvm_issues",
-                Text.literal("Issues (" + report.issues().size() + ")"),
-                Text.literal(issuesSb.toString().trim()),
-                Impact.NONE,
-                () -> report.issues().size() + " issue(s)",
-                v -> {},
-                ""))
-            .add(new Option<>("jvm_export",
-                Text.literal("Export Recommended Args"),
-                Text.literal("Writes caesium_jvm_args.txt to your .minecraft folder with "
-                    + "optimised JVM arguments for your Java version. Open it and paste "
-                    + "into your launcher's JVM arguments field."),
-                Impact.NONE,
-                () -> "Click to Export",
-                v -> {
-                    net.minecraft.client.MinecraftClient mc =
-                        net.minecraft.client.MinecraftClient.getInstance();
-                    if (mc != null) {
-                        destiny.renderer.jvm.JvmArgumentAnalyzer.exportRecommendedArgs(
-                            mc.runDirectory.toPath());
-                    }
-                },
-                ""))
-            .build();
+        OptionGroup.Builder recBuilder = OptionGroup.builder().title("Recommendations");
 
-        return new OptionPage("jvm", Text.literal("JVM"), List.of(status, recommendations));
+        recBuilder.add(new Option<>("jvm_export",
+            Text.literal("Export Recommended Args"),
+            Text.literal("Writes caesium_jvm_args.txt to your .minecraft folder with "
+                + "optimised JVM arguments for your Java version. Open it and paste "
+                + "into your launcher's JVM arguments field."),
+            Impact.NONE,
+            () -> "Click to Export",
+            v -> {
+                net.minecraft.client.MinecraftClient mc =
+                    net.minecraft.client.MinecraftClient.getInstance();
+                if (mc != null) {
+                    destiny.renderer.jvm.JvmArgumentAnalyzer.exportRecommendedArgs(
+                        mc.runDirectory.toPath());
+                }
+            },
+            ""));
+
+        if (report.issues().isEmpty()) {
+            recBuilder.add(new Option<>("jvm_clean",
+                Text.literal("[OK] Configuration Optimal"),
+                Text.literal("Your JVM flags are well configured for Minecraft."),
+                Impact.NONE,
+                () -> "No Issues",
+                v -> {},
+                "No Issues"));
+        } else {
+            int issueIdx = 1;
+            for (destiny.renderer.jvm.JvmArgumentAnalyzer.JvmIssue issue : report.issues()) {
+                Impact impact = issue.severity() == destiny.renderer.jvm.JvmArgumentAnalyzer.Severity.CRITICAL ? Impact.EXTREME
+                    : issue.severity() == destiny.renderer.jvm.JvmArgumentAnalyzer.Severity.HIGH ? Impact.HIGH
+                    : issue.severity() == destiny.renderer.jvm.JvmArgumentAnalyzer.Severity.MEDIUM ? Impact.MEDIUM : Impact.LOW;
+                String title = "[" + issue.severity().name() + "] " + issue.title();
+                String desc = issue.description() + "\n\nRecommended Fix:\n" + issue.fix();
+                String fixSummary = issue.fix().length() > 30 ? issue.fix().substring(0, 27) + "..." : issue.fix();
+
+                recBuilder.add(new Option<>("jvm_issue_" + (issueIdx++),
+                    Text.literal(title),
+                    Text.literal(desc),
+                    impact,
+                    () -> fixSummary,
+                    v -> {},
+                    fixSummary)
+                    .explanation(desc));
+            }
+        }
+
+        return new OptionPage("jvm", Text.literal("JVM"), List.of(status, recBuilder.build()));
     }
 
     // ------------------------------------------------------------- Hardware
@@ -1385,35 +1407,41 @@ public final class OptionRegistry {
                 Text.literal("GPU"),
                 Text.literal("Active graphics processor detected by the renderer."),
                 Impact.NONE,
-                () -> gpu, v -> {}, gpu))
+                () -> gpu, v -> {}, gpu)
+                .explanation("The physical or virtual graphics adapter currently driving OpenGL / Vulkan rendering for Minecraft."))
             .add(new Option<>("hw_vendor",
                 Text.literal("Vendor"),
                 Text.literal("GPU Manufacturer (NVIDIA, AMD, Intel, Apple)."),
                 Impact.NONE,
-                () -> vendor, v -> {}, vendor))
+                () -> vendor, v -> {}, vendor)
+                .explanation("Hardware vendor identified by driver string analysis."))
             .add(new Option<>("hw_vram",
                 Text.literal("Video Memory"),
                 Text.literal("Estimated VRAM / system memory pool available."),
                 Impact.NONE,
-                () -> vramStr, v -> {}, vramStr))
+                () -> vramStr, v -> {}, vramStr)
+                .explanation("Total dedicated or shared video memory accessible for chunk geometry, texture atlases, and framebuffers."))
             .add(new Option<>("hw_cpu",
                 Text.literal("CPU Threads"),
                 Text.literal("Logical processor threads available for chunk meshing."),
                 Impact.NONE,
-                () -> cores + " logical cores", v -> {}, cores + " cores"))
+                () -> cores + " logical cores", v -> {}, cores + " cores")
+                .explanation("Logical CPU cores detected by the JVM runtime for asynchronous chunk rebuilds and work-stealing job pools."))
             .build();
 
         OptionGroup engineTuning = OptionGroup.builder().title("Engine Strategy")
             .add(new Option<>("hw_profile",
                 Text.literal("Hardware Profile"),
-                Text.literal("Determines whether the engine runs in Low-Bandwidth mode (for iGPUs) or GPU-Driven mode (for dGPUs)."),
+                Text.literal("Hardware architecture tier used for automatic tuning."),
                 Impact.NONE,
-                () -> profileName, v -> {}, profileName))
+                () -> profileName, v -> {}, profileName)
+                .explanation("Architecture profile detected at startup: Low-Bandwidth (integrated GPUs), Standard (mainstream GPUs), or High-Performance (discrete dGPUs with high VRAM bandwidth)."))
             .add(new Option<>("hw_caps",
                 Text.literal("Detected Capabilities"),
                 Text.literal(caps),
                 Impact.NONE,
-                () -> "Capabilities", v -> {}, ""))
+                () -> "Capabilities", v -> {}, "")
+                .explanation("Advanced GPU hardware features available on this driver: Multi-Draw Indirect (batching thousands of chunk sections in one draw call), Mesh Shaders, Bindless Textures, and Indirect Parameters."))
             .build();
 
         return new OptionPage("hardware", Text.literal("Hardware"), List.of(gpuInfo, engineTuning));
@@ -1429,14 +1457,16 @@ public final class OptionRegistry {
                 Text.literal("Real-time FPS and average frame pacing."),
                 Impact.NONE,
                 () -> mc != null ? (mc.getCurrentFps() + " FPS (" + String.format("%.2f", 1000.0 / Math.max(1, mc.getCurrentFps())) + " ms)") : "N/A",
-                v -> {}, ""))
+                v -> {}, "")
+                .explanation("Instantaneous frames per second and average millisecond frame time pacing rendered by the client."))
             .add(new Option<>("tel_chunks",
                 Text.literal("Loaded Chunks"),
                 Text.literal("Number of loaded chunk sections in the current world."),
                 Impact.NONE,
                 () -> (mc != null && mc.world != null && mc.world.getChunkManager() != null)
                     ? (mc.world.getChunkManager().getLoadedChunkCount() + " chunks") : "0 chunks",
-                v -> {}, ""))
+                v -> {}, "")
+                .explanation("Total active chunk sections loaded in client world memory."))
             .add(new Option<>("tel_backend",
                 Text.literal("Active Backend"),
                 Text.literal("Current graphics backend driving the renderer."),
@@ -1444,13 +1474,15 @@ public final class OptionRegistry {
                 () -> destiny.renderer.DestinyRenderer.getActiveBackend() != null
                     ? destiny.renderer.DestinyRenderer.getActiveBackend().name()
                     : (cfg().renderingBackend != null ? cfg().renderingBackend : "OpenGL 3.3"),
-                v -> {}, ""))
+                v -> {}, "")
+                .explanation("Active rendering pipeline: OpenGL 3.3/4.3 compatibility core or experimental Vulkan pipeline."))
             .add(new Option<>("tel_mesher",
                 Text.literal("Meshing Queue"),
                 Text.literal("Section rebuild queue status."),
                 Impact.NONE,
                 () -> "Optimized / Active",
-                v -> {}, ""))
+                v -> {}, "")
+                .explanation("Real-time worker thread meshing queue throughput, frame-pacing backpressure, and deferred rebuild status."))
             .build();
 
         return new OptionPage("telemetry", Text.literal("Telemetry"), List.of(live));

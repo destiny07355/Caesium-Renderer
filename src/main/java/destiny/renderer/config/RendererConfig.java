@@ -647,6 +647,9 @@ public final class RendererConfig {
     /** Custom theme background colour (ARGB) used when themePreset is CUSTOM. */
     public int customBackgroundColor = 0xF00A0A0C;
 
+    /** Whether the first-open quick tip tutorial popup has been displayed. */
+    public boolean firstOpenTutorialShown = false;
+
     // -------------------------------------------------------------------------
     // Persistence
     // -------------------------------------------------------------------------

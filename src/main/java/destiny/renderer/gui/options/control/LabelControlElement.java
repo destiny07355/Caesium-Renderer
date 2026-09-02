@@ -9,8 +9,7 @@ import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 
 /**
- * Informational readout or action label control.
- * Used for Hardware, Telemetry, JVM stats and informational rows.
+ * Informational readout or action label control with title-click support.
  */
 public final class LabelControlElement extends ControlElement<Object> {
 
@@ -53,6 +52,10 @@ public final class LabelControlElement extends ControlElement<Object> {
     @Override
     public void onClick(Click click, boolean doubled) {
         if (!this.visible || !this.active || !isOptionEnabled()) return;
+        if (isTitleArea(click.x())) {
+            if (onTitleClick != null) onTitleClick.accept(option);
+            return;
+        }
         try {
             option.setValue(option.getValue());
         } catch (Throwable ignored) {}

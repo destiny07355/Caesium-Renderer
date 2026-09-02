@@ -126,6 +126,16 @@ public final class TranslucencySorter {
         // Sort indices by descending distance
         java.util.Arrays.sort(order, (a, b) -> Float.compare(dist2[b], dist2[a]));
 
+        // Fast path: for small quad counts (< 32), distance-squared sorting is visually identical
+        // and avoids building the O(Q^2) dependency graph and DFS.
+        if (quadCount < 32) {
+            int[] vertexOrder = new int[quadCount];
+            for (int i = 0; i < quadCount; i++) {
+                vertexOrder[i] = startVertices[order[i]];
+            }
+            return vertexOrder;
+        }
+
         // --- Topological refinement (Douira's algorithm) ---
         // Build a sparse dependency graph: edge[i] → list of quads that must draw before i
         @SuppressWarnings("unchecked")

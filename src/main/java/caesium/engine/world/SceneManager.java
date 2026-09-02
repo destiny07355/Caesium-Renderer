@@ -98,7 +98,7 @@ public final class SceneManager {
             float cx = s.chunkX() * 16f + 8f;
             float cy = s.y() * 16f + 8f;
             float cz = s.chunkZ() * 16f + 8f;
-            int vertLimit = 32; // covers full world height in sections
+            float vertLimit = 512f; // covers full world height in blocks
             boolean keep = Math.abs(cx - camera.x()) <= limit
                     && Math.abs(cy - camera.y()) <= vertLimit
                     && Math.abs(cz - camera.z()) <= limit;

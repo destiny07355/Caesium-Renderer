@@ -135,7 +135,7 @@ float limit=(vd+2)*16f;
 float cx=pos.getMinX()+8f;
 float cy=pos.getMinY()+8f;
 float cz=pos.getMinZ()+8f;
-if(Math.abs(cx-(float)camPos.x)>limit||Math.abs(cy-(float)camPos.y)>limit||Math.abs(cz-(float)camPos.z)>limit){
+if(Math.abs(cx-(float)camPos.x)>limit||Math.abs(cy-(float)camPos.y)>512f||Math.abs(cz-(float)camPos.z)>limit){
 return;
 }
 pruneRevisions(camPos,limit);

@@ -7,12 +7,11 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 
 /**
- * Animated checkbox control.
- * Inner fill grows/shrinks using GuiAnimator.checkFill() spring animation.
+ * Animated checkbox control with title-click support for description opening.
  */
 public final class TickBoxControlElement extends ControlElement<Boolean> {
 
-    private static final int BOX_SIZE = CaesiumTheme.CHECKBOX_SIZE;
+    private static final int BOX_SIZE = 14;
 
     public TickBoxControlElement(Option<Boolean> option, int x, int y, int width, int height) {
         super(option, x, y, width, height);
@@ -24,17 +23,13 @@ public final class TickBoxControlElement extends ControlElement<Boolean> {
         boolean on      = Boolean.TRUE.equals(option.getValue());
         boolean hovered = isHovered() && enabled;
 
-        // Drive checkbox animation
         anim.setChecked(on);
-        // anim.tick() already called in parent renderWidget
 
         int bx = getX() + width - BOX_SIZE - 12;
         int by = getY() + (height - BOX_SIZE) / 2;
 
-        // Box background with border
         GuiRenderer.controlBox(context, bx, by, BOX_SIZE, BOX_SIZE, hovered, on, enabled);
 
-        // Animated inner fill — grows from center using checkFill progress
         if (enabled) {
             float progress = anim.checkFill();
             if (progress > 0.02f) {
@@ -53,6 +48,10 @@ public final class TickBoxControlElement extends ControlElement<Boolean> {
     @Override
     public void onClick(net.minecraft.client.gui.Click click, boolean doubled) {
         if (!this.active || !this.visible || !isOptionEnabled()) return;
+        if (isTitleArea(click.x())) {
+            if (onTitleClick != null) onTitleClick.accept(option);
+            return;
+        }
         this.playDownSound(MinecraftClient.getInstance().getSoundManager());
         option.setValue(!Boolean.TRUE.equals(option.getValue()));
     }

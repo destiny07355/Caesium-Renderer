@@ -11,17 +11,23 @@ import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.narration.NarrationMessageBuilder;
 import net.minecraft.client.gui.widget.ClickableWidget;
 
+import java.util.function.Consumer;
+
 /**
  * Base class for all option row widgets.
- * Uses {@link GuiAnimator} for hover animation and {@link GuiRenderer} for drawing.
+ * Features a single clean centered label without duplicated bottom descriptions,
+ * strict hover clipping, and click-to-open description support.
  */
 public abstract class ControlElement<T> extends ClickableWidget {
 
     protected final Option<T> option;
-    protected static final int CONTROL_WIDTH = 100;
+    protected static final int CONTROL_WIDTH = 90;
 
     /** Per-row hover animation state. */
     protected final GuiAnimator anim = new GuiAnimator();
+
+    /** Callback invoked when the user clicks the setting's name / label area. */
+    public Consumer<Option<?>> onTitleClick = null;
 
     protected ControlElement(Option<T> option, int x, int y, int width, int height) {
         super(x, y, width, height, option.getName());
@@ -42,36 +48,25 @@ public abstract class ControlElement<T> extends ClickableWidget {
         anim.setHovered(hovered);
         anim.tick(Math.max(0.001f, Math.min(0.1f, delta)));
 
-        // Animated hover highlight
-        GuiRenderer.rowHoverAnimated(context, getX(), getY(), width, height, anim.hover());
-
-        // Non-default accent bar on left edge
-        if (option.isNonDefault() && enabled) {
-            GuiRenderer.rowModifiedBar(context, getX(), getY(), height);
+        // Animated hover highlight strictly clipped to row rect
+        if (anim.hover() > 0.01f) {
+            GuiRenderer.rowHoverAnimated(context, getX(), getY(), width, height, anim.hover());
         }
 
         TextRenderer tr = MinecraftClient.getInstance().textRenderer;
-        int titleColor = !enabled ? CaesiumTheme.TEXT_DISABLED : CaesiumTheme.TEXT_PRIMARY;
-        int descColor  = !enabled ? CaesiumTheme.TEXT_DISABLED : CaesiumTheme.TEXT_SECONDARY;
+        int titleColor = !enabled ? CaesiumTheme.TEXT_DISABLED
+                       : (hovered && mouseX < controlX() ? CaesiumTheme.accentBright() : CaesiumTheme.TEXT_PRIMARY);
 
-        int labelMaxW = width - CONTROL_WIDTH - 20;
+        int labelMaxW = width - CONTROL_WIDTH - 16;
         String title = option.getName().getString();
         if (tr.getWidth(title) > labelMaxW) {
-            title = tr.trimToWidth(title, labelMaxW - tr.getWidth("...")) + "...";
+            title = tr.trimToWidth(title, Math.max(10, labelMaxW - tr.getWidth("..."))) + "...";
         }
 
-        String desc = option.getTooltip() != null ? option.getTooltip().getString() : "";
-        if (tr.getWidth(desc) > labelMaxW) {
-            desc = tr.trimToWidth(desc, labelMaxW - tr.getWidth("...")) + "...";
-        }
-
-        if (height >= 30 && !desc.isEmpty()) {
-            context.drawText(tr, CaesiumFont.text(title), getX() + CaesiumTheme.ITEM_INDENT, getY() + 6,  titleColor, false);
-            context.drawText(tr, CaesiumFont.text(desc),  getX() + CaesiumTheme.ITEM_INDENT, getY() + 18, descColor,  false);
-        } else {
-            context.drawText(tr, CaesiumFont.text(title), getX() + CaesiumTheme.ITEM_INDENT,
-                getY() + (height - 8) / 2, titleColor, false);
-        }
+        // Single clean vertically centered title without clutter
+        int titleY = getY() + (height - 8) / 2;
+        context.drawText(tr, CaesiumFont.text(title), getX() + CaesiumTheme.ITEM_INDENT,
+            titleY, titleColor, false);
 
         renderControl(context, mouseX, mouseY, delta, enabled);
     }
@@ -79,8 +74,21 @@ public abstract class ControlElement<T> extends ClickableWidget {
     protected abstract void renderControl(DrawContext context, int mouseX, int mouseY,
                                           float delta, boolean enabled);
 
-    protected int controlX() {
-        return getX() + width - CONTROL_WIDTH - 8;
+    public int controlX() {
+        return getX() + width - CONTROL_WIDTH - 6;
+    }
+
+    public boolean isTitleArea(double mx) {
+        return mx >= getX() && mx < controlX();
+    }
+
+    @Override
+    public void onClick(net.minecraft.client.gui.Click click, boolean doubled) {
+        if (isTitleArea(click.x()) && onTitleClick != null) {
+            onTitleClick.accept(option);
+            return;
+        }
+        super.onClick(click, doubled);
     }
 
     @Override

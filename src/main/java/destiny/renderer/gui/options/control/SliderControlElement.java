@@ -8,13 +8,12 @@ import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.gui.DrawContext;
 
 /**
- * Numeric slider control.
- * Uses GuiRenderer.progressBar for the track and GuiRenderer.controlBox for the knob.
+ * Compact numeric slider control with integrated value label and click-to-open description support.
  */
 public final class SliderControlElement extends ControlElement<Object> {
 
-    private static final int TRACK_W = CaesiumTheme.SLIDER_TRACK_W;
-    private static final int VALUE_W = CaesiumTheme.SLIDER_VALUE_W;
+    private static final int TRACK_W = 68;
+    private static final int VALUE_W = 24;
 
     private boolean dragging = false;
 
@@ -38,28 +37,30 @@ public final class SliderControlElement extends ControlElement<Object> {
         boolean hovered = (isHovered() || dragging) && enabled;
 
         int tx = trackX();
-        int ty = getY() + height / 2 - CaesiumTheme.SLIDER_TRACK_H / 2;
+        int ty = getY() + (height - CaesiumTheme.SLIDER_TRACK_H) / 2;
         int th = CaesiumTheme.SLIDER_TRACK_H;
 
-        // Track (empty portion)
-        int trackColor  = !enabled ? 0x40FFFFFF : 0x30FFFFFF;
+        // Track background & fill
+        int trackColor  = !enabled ? 0x28FFFFFF : 0x22FFFFFF;
         int accentColor = !enabled ? CaesiumTheme.TEXT_DISABLED
                         : hovered  ? CaesiumTheme.accentBright()
                         :            CaesiumTheme.accent();
 
         GuiRenderer.progressBar(context, tx, ty, TRACK_W, th, frac, accentColor, trackColor);
 
-        // Knob
-        int kw = CaesiumTheme.SLIDER_KNOB_W;
-        int kx = tx + Math.max(0, Math.min(TRACK_W - kw, (int)(frac * TRACK_W) - kw / 2));
-        int kColor = enabled ? CaesiumTheme.TEXT_PRIMARY : CaesiumTheme.TEXT_DISABLED;
-        context.fill(kx, getY() + 4, kx + kw, getY() + height - 4, kColor);
+        // Compact Knob
+        int kw = 4;
+        int kx = tx + Math.max(0, Math.min(TRACK_W - kw, (int)(frac * (TRACK_W - kw))));
+        int kh = 10;
+        int ky = getY() + (height - kh) / 2;
+        int kColor = enabled ? (hovered ? 0xFFFFFFFF : 0xFFE0E0E0) : CaesiumTheme.TEXT_DISABLED;
+        context.fill(kx, ky, kx + kw, ky + kh, kColor);
 
-        // Value readout
+        // Compact Value readout beside the track
         TextRenderer tr = MinecraftClient.getInstance().textRenderer;
         String text = option.getFormattedValue();
         int textW = tr.getWidth(text);
-        int textX = tx - VALUE_W + Math.max(0, VALUE_W - textW) - 4;
+        int textX = tx - VALUE_W + Math.max(0, (VALUE_W - textW) / 2) - 2;
         int textY = getY() + (height - 8) / 2;
         context.drawText(tr, CaesiumFont.text(text), textX, textY,
             enabled ? CaesiumTheme.TEXT_SECONDARY : CaesiumTheme.TEXT_DISABLED, false);
@@ -88,8 +89,12 @@ public final class SliderControlElement extends ControlElement<Object> {
     @Override
     public void onClick(net.minecraft.client.gui.Click click, boolean doubled) {
         if (!this.active || !this.visible || !isOptionEnabled()) return;
+        if (isTitleArea(click.x())) {
+            if (onTitleClick != null) onTitleClick.accept(option);
+            return;
+        }
         int tx = trackX();
-        if (click.x() >= tx - 4 && click.x() <= tx + TRACK_W + 4) {
+        if (click.x() >= tx - 6 && click.x() <= tx + TRACK_W + 6) {
             this.playDownSound(MinecraftClient.getInstance().getSoundManager());
             dragging = true;
             applyFromMouse(click.x());
