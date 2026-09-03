@@ -95,12 +95,6 @@ public final class JvmArgumentAnalyzer {
                 "Parallel GC targets throughput over latency — causes frame spikes during GC.",
                 "-XX:+UseG1GC"));
             score -= 20;
-        } else if (gc == GcType.G1 && javaVersion >= 21) {
-            issues.add(new JvmIssue(Severity.LOW,
-                "G1GC — ZGC would be better on Java 21+",
-                "ZGC with generational mode has sub-millisecond pauses vs G1's 50ms target.",
-                "-XX:+UseZGC -XX:+ZGenerational"));
-            score -= 5;
         }
 
         // --- Heap tuning ---
@@ -130,6 +124,12 @@ public final class JvmArgumentAnalyzer {
                 + "GC churn and eventual OutOfMemoryError.",
                 "-Xmx4G"));
             score -= 15;
+        } else if (maxHeapMb > 10240) {
+            issues.add(new JvmIssue(Severity.LOW,
+                "Excessive heap allocation (" + maxHeapMb + " MB)",
+                "Allocating more than 6-8 GB for vanilla/light modpacks increases GC tracking overhead and reduces CPU memory cache efficiency.",
+                "-Xmx6G"));
+            score -= 3;
         }
 
         // --- G1GC-specific tuning ---
@@ -137,26 +137,41 @@ public final class JvmArgumentAnalyzer {
             if (!containsArg(inputArgs, "G1HeapRegionSize")) {
                 issues.add(new JvmIssue(Severity.MEDIUM,
                     "G1HeapRegionSize not set",
-                    "Default region size (1-32MB auto) often under-sizes for Minecraft's "
-                    + "large block/chunk allocations. 32MB is optimal for 4GB+ heaps.",
+                    "Default region size often under-sizes for Minecraft's chunk allocations. 32MB is optimal for 4GB+ heaps.",
                     "-XX:G1HeapRegionSize=32m"));
                 score -= 5;
             }
             if (!containsArg(inputArgs, "MaxGCPauseMillis")) {
                 issues.add(new JvmIssue(Severity.MEDIUM,
                     "MaxGCPauseMillis not set",
-                    "G1GC defaults to 200ms pause target — at 60fps you have 16ms per frame. "
-                    + "Set a tighter target.",
-                    "-XX:MaxGCPauseMillis=37"));
+                    "G1GC defaults to 200ms pause target. Set a tighter target for 60-144 FPS gaming.",
+                    "-XX:MaxGCPauseMillis=20"));
                 score -= 5;
             }
             if (!containsArg(inputArgs, "G1NewSizePercent")) {
                 issues.add(new JvmIssue(Severity.LOW,
                     "G1 new-gen sizing not tuned",
-                    "Default new-gen sizing may be too aggressive for Minecraft's "
-                    + "mixed short/long-lived allocation pattern.",
-                    "-XX:G1NewSizePercent=20 -XX:G1ReservePercent=20"));
+                    "Default new-gen sizing may be too aggressive for Minecraft's allocation pattern.",
+                    "-XX:G1NewSizePercent=20 -XX:G1ReservePercent=15"));
                 score -= 3;
+            }
+        }
+
+        // --- ZGC-specific tuning ---
+        if (gc == GcType.ZGC) {
+            if (javaVersion >= 21 && !containsArg(inputArgs, "ZGenerational")) {
+                issues.add(new JvmIssue(Severity.HIGH,
+                    "ZGC without generational mode (Java 21+)",
+                    "Generational ZGC cuts GC CPU overhead by ~50% compared to legacy ZGC.",
+                    "-XX:+ZGenerational"));
+                score -= 10;
+            }
+            if (!containsArg(inputArgs, "ConcGCThreads")) {
+                issues.add(new JvmIssue(Severity.MEDIUM,
+                    "ZGC ConcGCThreads not restricted",
+                    "By default ZGC can spawn too many concurrent threads, competing with Minecraft's game and render loops. Set to 2.",
+                    "-XX:ConcGCThreads=2"));
+                score -= 5;
             }
         }
 
@@ -179,32 +194,12 @@ public final class JvmArgumentAnalyzer {
             score -= 3;
         }
 
-        if (!containsArg(inputArgs, "PerfDisableSharedMem")) {
-            issues.add(new JvmIssue(Severity.LOW,
-                "-XX:+PerfDisableSharedMem not set",
-                "JVM perf counters written to /tmp can cause I/O stalls on Linux. "
-                + "Disabling them is safe for gaming.",
-                "-XX:+PerfDisableSharedMem"));
-            score -= 2;
-        }
-
         if (javaVersion >= 17 && !containsArg(inputArgs, "UseStringDeduplication")) {
             issues.add(new JvmIssue(Severity.LOW,
                 "-XX:+UseStringDeduplication not set",
-                "String deduplication can reduce heap usage by 5-15% in modded Minecraft "
-                + "by deduplicating identical String objects.",
+                "String deduplication reduces heap memory usage by 5-15% in Minecraft.",
                 "-XX:+UseStringDeduplication"));
             score -= 2;
-        }
-
-        // --- ZGC-specific ---
-        if (gc == GcType.ZGC && javaVersion >= 21 && !containsArg(inputArgs, "ZGenerational")) {
-            issues.add(new JvmIssue(Severity.MEDIUM,
-                "ZGC without generational mode (Java 21+)",
-                "Generational ZGC has significantly lower overhead than non-generational ZGC "
-                + "for Minecraft's mixed allocation pattern.",
-                "-XX:+ZGenerational"));
-            score -= 8;
         }
 
         score = Math.max(0, score);

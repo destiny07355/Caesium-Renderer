@@ -124,9 +124,12 @@ engine.scheduler().execute(input);
 engine.scheduler().endFrame(input);
 }
 
+private static final ThreadLocal<ChunkSectionData> threadLocalSectionData = ThreadLocal.withInitial(ChunkSectionData::new);
+
 public static void extractSection(ChunkSectionPos pos){
 if(!started||engine==null||extractPool==null)return;
 if(dormant())return;
+if(!destiny.renderer.compat.WorkAllotment.ownsTerrain())return;
 MinecraftClient mc=MinecraftClient.getInstance();
 if(mc==null||mc.world==null||mc.gameRenderer==null)return;
 Vec3d camPos=mc.gameRenderer.getCamera().getCameraPos();
@@ -148,7 +151,7 @@ MinecraftClient mc2=MinecraftClient.getInstance();
 ClientWorld world=mc2==null?null:mc2.world;
 if(world==null)return;
 if(rev.get()!=nextRev)return;
-ChunkSectionData data=new ChunkSectionData();
+ChunkSectionData data=threadLocalSectionData.get();
 data.populate(world,pos.getMinX()-1,pos.getMinY()-1,pos.getMinZ()-1);
 if(rev.get()!=nextRev)return;
 RenderWorld.SectionMesh mesh=SectionMeshExtractor.extract(pos,data,nextRev);

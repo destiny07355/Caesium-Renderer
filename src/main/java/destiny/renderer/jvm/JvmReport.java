@@ -54,14 +54,14 @@ public final class JvmReport {
      * Produces args optimised for the detected Java version and system heap.
      */
     public String buildRecommendedArgsFile() {
-        long targetHeapMb = Math.max(heapMb, 4096);
-        boolean useZgc = javaVersion >= 21;
+        long targetHeapMb = heapMb > 0 ? Math.min(6144, Math.max(4096, heapMb)) : 4096;
+        boolean useZgc = gc == JvmArgumentAnalyzer.GcType.ZGC || (javaVersion >= 21 && gc != JvmArgumentAnalyzer.GcType.G1);
 
         StringBuilder sb = new StringBuilder();
         sb.append("# ==========================================================\n");
         sb.append("# Caesium Recommended JVM Arguments\n");
         sb.append("# Generated for: Java ").append(javaVersion)
-          .append(" | Heap: ").append(heapMb).append(" MB\n");
+          .append(" | Heap: ").append(targetHeapMb).append(" MB\n");
         sb.append("# Score before: ").append(score).append("/100 (").append(scoreLabel()).append(")\n");
         sb.append("# ==========================================================\n");
         sb.append("# Paste these into your launcher's JVM Arguments field.\n");
@@ -69,70 +69,55 @@ public final class JvmReport {
         sb.append("# ==========================================================\n\n");
 
         if (useZgc) {
-            sb.append("# --- Garbage Collector (ZGC — sub-millisecond pauses, Java 21+) ---\n");
+            sb.append("# --- Garbage Collector (ZGC — Sub-Millisecond Pause Mode) ---\n");
             sb.append("-XX:+UseZGC\n");
-            sb.append("-XX:+ZGenerational\n");
+            if (javaVersion >= 21) {
+                sb.append("-XX:+ZGenerational\n");
+            }
+            sb.append("-XX:ConcGCThreads=2\n");
         } else {
-            sb.append("# --- Garbage Collector (G1GC) ---\n");
+            sb.append("# --- Garbage Collector (G1GC — Low-Latency & High Throughput) ---\n");
             sb.append("-XX:+UseG1GC\n");
-            sb.append("-XX:MaxGCPauseMillis=37\n");
+            sb.append("-XX:MaxGCPauseMillis=20\n");
             sb.append("-XX:+UnlockExperimentalVMOptions\n");
             sb.append("-XX:G1NewSizePercent=20\n");
-            sb.append("-XX:G1ReservePercent=20\n");
+            sb.append("-XX:G1ReservePercent=15\n");
             sb.append("-XX:G1HeapRegionSize=32m\n");
-            sb.append("-XX:G1MixedGCCountTarget=4\n");
-            sb.append("-XX:G1MixedGCLiveThresholdPercent=90\n");
-            sb.append("-XX:G1RSetUpdatingPauseTimePercent=5\n");
+            sb.append("-XX:InitiatingHeapOccupancyPercent=45\n");
+            sb.append("-XX:+ParallelRefProcEnabled\n");
             sb.append("-XX:SurvivorRatio=32\n");
             sb.append("-XX:MaxTenuringThreshold=1\n");
         }
 
-        sb.append("\n# --- Memory ---\n");
+        sb.append("\n# --- Memory & Allocation ---\n");
         sb.append("-Xms").append(targetHeapMb).append("M\n");
         sb.append("-Xmx").append(targetHeapMb).append("M\n");
         sb.append("-XX:+AlwaysPreTouch\n");
 
-        sb.append("\n# --- GC Behaviour ---\n");
+        sb.append("\n# --- Stability & Optimization ---\n");
         sb.append("-XX:+DisableExplicitGC\n");
         sb.append("-XX:+UseStringDeduplication\n");
-        sb.append("-XX:+PerfDisableSharedMem\n");
-
-        sb.append("\n# --- JIT Compiler ---\n");
         sb.append("-XX:+OptimizeStringConcat\n");
-        sb.append("-XX:+UseCompressedOops\n");
-        sb.append("-XX:-DontCompileHugeMethods\n");
-        sb.append("-XX:ReservedCodeCacheSize=512m\n");
-        sb.append("-XX:NonNMethodCodeHeapSize=12m\n");
-        sb.append("-XX:ProfiledCodeHeapSize=194m\n");
-        sb.append("-XX:NonProfiledCodeHeapSize=244m\n");
-
-        sb.append("\n# --- Network / Misc ---\n");
-        sb.append("-Djava.net.preferIPv4Stack=true\n");
-        sb.append("-Dfml.ignorePatchDiscrepancies=true\n");
-        sb.append("-Dfml.ignoreInvalidMinecraftCertificates=true\n");
 
         sb.append("\n# ==========================================================\n");
         sb.append("# One-liner (for launchers that want a single line):\n");
         sb.append("# ==========================================================\n");
 
-        // Build one-liner
         String oneLiner;
         if (useZgc) {
             oneLiner = String.format(
-                "-XX:+UseZGC -XX:+ZGenerational -Xms%dM -Xmx%dM "
+                "-XX:+UseZGC%s -XX:ConcGCThreads=2 -Xms%dM -Xmx%dM "
                 + "-XX:+AlwaysPreTouch -XX:+DisableExplicitGC "
-                + "-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem "
-                + "-XX:+OptimizeStringConcat -XX:ReservedCodeCacheSize=512m "
-                + "-Djava.net.preferIPv4Stack=true",
+                + "-XX:+UseStringDeduplication -XX:+OptimizeStringConcat",
+                javaVersion >= 21 ? " -XX:+ZGenerational" : "",
                 targetHeapMb, targetHeapMb);
         } else {
             oneLiner = String.format(
-                "-XX:+UseG1GC -XX:MaxGCPauseMillis=37 -XX:+UnlockExperimentalVMOptions "
-                + "-XX:G1HeapRegionSize=32m -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 "
+                "-XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:+UnlockExperimentalVMOptions "
+                + "-XX:G1HeapRegionSize=32m -XX:G1NewSizePercent=20 -XX:G1ReservePercent=15 "
+                + "-XX:InitiatingHeapOccupancyPercent=45 -XX:+ParallelRefProcEnabled "
                 + "-Xms%dM -Xmx%dM -XX:+AlwaysPreTouch -XX:+DisableExplicitGC "
-                + "-XX:+UseStringDeduplication -XX:+PerfDisableSharedMem "
-                + "-XX:+OptimizeStringConcat -XX:ReservedCodeCacheSize=512m "
-                + "-Djava.net.preferIPv4Stack=true",
+                + "-XX:+UseStringDeduplication -XX:+OptimizeStringConcat",
                 targetHeapMb, targetHeapMb);
         }
         sb.append(oneLiner).append("\n");

@@ -6,9 +6,7 @@ import net.minecraft.block.AbstractFireBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.Frustum;
 import net.minecraft.fluid.Fluids;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkSectionPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
@@ -19,25 +17,11 @@ import org.joml.Matrix4f;
 import java.util.function.Predicate;
 
 /**
- * Per-frame view-frustum visibility for the animated-texture categories.
+ * Per-frame view-frustum visibility for animated-texture categories.
  *
- * <p>Vanilla advances every animated sprite (fire, water, lava, portals, …) every frame
- * regardless of whether anything on screen uses it, then re-uploads the dirty regions of
- * the atlas. In a burning field that is per-frame CPU + GPU work for textures the camera
- * is not even looking at. This tracker answers the question the animation controller needs
- * — <em>"is there any visible block of this texture's category right now?"</em> — so the
- * controller can freeze exactly the categories that are off-screen.
- *
- * <p>Answers are produced from a coarse but cheap signal: each chunk section keeps a
- * cached bitmask of which animated categories it contains (computed lazily via the section
- * palette, invalidated on rebuild), and each scan ORs together the masks of the sections
- * that intersect the current view frustum.
- *
- * <h2>Cost</h2>
- * A scan iterates one column AABB test per loaded chunk column (≈ a few hundred) and a
- * cached mask lookup per section that survives the column test. Sections are only actually
- * classified on first sight. Scans are throttled to {@link #SCAN_INTERVAL_MS} and are a
- * no-op when the world, camera or toggle are absent.
+ * <p>Freezes off-screen texture animations (fire, water, lava, portals, sculk)
+ * without ever stalling the render thread. Section classification is cached
+ * and rate-limited to prevent frame drops during world loading or teleportation.
  */
 public final class SpriteVisibilityTracker {
 
@@ -47,17 +31,17 @@ public final class SpriteVisibilityTracker {
     public static final int CAT_PORTAL = 8;
     public static final int CAT_SCULK  = 16;
 
-    /** Recompute the visible set at most this often; a one-frame delay is imperceptible. */
-    private static final long SCAN_INTERVAL_MS = 100L;
+    /** Recompute the visible set at most 4 times a second. */
+    private static final long SCAN_INTERVAL_MS = 250L;
+
+    /** Maximum new unclassified sections evaluated per scan to keep frame time < 0.2ms. */
+    private static final int MAX_NEW_CLASSIFICATIONS_PER_SCAN = 16;
 
     /** Cached per-section animated-category bitmask, keyed by packed section position. */
     private static final ConcurrentHashMap<Long, Byte> SECTION_MASKS = new ConcurrentHashMap<>();
 
-    private static volatile int visibleCategories = 0;
+    private static volatile int visibleCategories = 0x1F;
     private static long lastScanMs = 0L;
-    private static Matrix4f projection = null;
-    private static Matrix4f view = null;
-    private static Vec3d cameraPos = null;
 
     private static final Predicate<BlockState> IS_FIRE =
         s -> s.getBlock() instanceof AbstractFireBlock;
@@ -79,19 +63,17 @@ public final class SpriteVisibilityTracker {
     }
 
     /**
-     * Records the camera state for this frame. Called unconditionally from
-     * {@code WorldRenderer.render} so the animation policy never depends on which backend
-     * owns terrain.
+     * Records the camera state for this frame and triggers a lightweight throttled scan.
      */
     public static void capture(Matrix4f projectionMatrix, Matrix4f viewMatrix, Vec3d cameraPosition) {
         if (projectionMatrix == null || viewMatrix == null || cameraPosition == null) return;
-        projection = projectionMatrix;
-        view = viewMatrix;
-        cameraPos = cameraPosition;
 
         MinecraftClient client = MinecraftClient.getInstance();
         if (client == null || client.world == null) return;
-        if (!RendererConfig.get().animateOnlyVisibleTextures) return;
+        if (!RendererConfig.get().animateOnlyVisibleTextures) {
+            visibleCategories = 0x1F;
+            return;
+        }
 
         long now = System.currentTimeMillis();
         if (now - lastScanMs < SCAN_INTERVAL_MS) return;
@@ -105,12 +87,14 @@ public final class SpriteVisibilityTracker {
         destiny.renderer.cull.FusedFrustumCuller frustum = destiny.renderer.cull.VisibilitySystem.getTerrainFrustum();
 
         ChunkSectionPos cameraSection = ChunkSectionPos.from(camera);
-        int radius = MinecraftClient.getInstance().options.getClampedViewDistance();
+        int radius = Math.min(12, MinecraftClient.getInstance().options.getClampedViewDistance());
         int bottomSection = world.getBottomSectionCoord();
         int topSection = world.getTopSectionCoord();
 
         int camSecX = cameraSection.getSectionX();
         int camSecZ = cameraSection.getSectionZ();
+
+        int classifiedThisScan = 0;
 
         for (int cx = camSecX - radius; cx <= camSecX + radius; cx++) {
             for (int cz = camSecZ - radius; cz <= camSecZ + radius; cz++) {
@@ -126,7 +110,21 @@ public final class SpriteVisibilityTracker {
                     int secMinY = sy << 4;
                     if (!frustum.isSectionVisible(secMinX, secMinY, secMinZ)) continue;
 
-                    int mask = sectionMask(chunk, sy, bottomSection);
+                    long key = packSectionKey(cx, sy, cz);
+                    Byte cached = SECTION_MASKS.get(key);
+
+                    int mask;
+                    if (cached != null) {
+                        mask = cached & 0xFF;
+                    } else if (classifiedThisScan < MAX_NEW_CLASSIFICATIONS_PER_SCAN) {
+                        mask = classifySection(chunk, sy, bottomSection);
+                        SECTION_MASKS.put(key, (byte) mask);
+                        classifiedThisScan++;
+                    } else {
+                        // Under load, assume visible so we never drop frames computing masks
+                        mask = 0x1F;
+                    }
+
                     if (mask != 0) {
                         newVisibleCategories |= mask;
                         if (newVisibleCategories == 0x1F) {
@@ -141,13 +139,7 @@ public final class SpriteVisibilityTracker {
         visibleCategories = newVisibleCategories;
     }
 
-    private static int sectionMask(WorldChunk chunk, int sectionCoord, int bottomSectionCoord) {
-        long key = packSectionKey(chunk.getPos().x, sectionCoord, chunk.getPos().z);
-        Byte cached = SECTION_MASKS.get(key);
-        if (cached != null) {
-            return cached & 0xFF;
-        }
-
+    private static int classifySection(WorldChunk chunk, int sectionCoord, int bottomSectionCoord) {
         int sectionIdx = sectionCoord - bottomSectionCoord;
         ChunkSection[] sections = chunk.getSectionArray();
         if (sectionIdx < 0 || sectionIdx >= sections.length) return 0;
@@ -161,7 +153,6 @@ public final class SpriteVisibilityTracker {
         if (section.hasAny(IS_PORTAL)) mask |= CAT_PORTAL;
         if (section.hasAny(IS_SCULK)) mask |= CAT_SCULK;
 
-        SECTION_MASKS.put(key, (byte) mask);
         return mask;
     }
 
@@ -173,7 +164,7 @@ public final class SpriteVisibilityTracker {
     /** Drops every cached mask, e.g. on world reload. */
     public static void invalidateAll() {
         SECTION_MASKS.clear();
-        visibleCategories = 0;
+        visibleCategories = 0x1F;
         lastScanMs = 0L;
     }
 

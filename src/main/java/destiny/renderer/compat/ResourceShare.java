@@ -118,7 +118,22 @@ public final class ResourceShare {
         // its own, so we shave a corresponding amount off ours rather than oversubscribing.
         int competitors = competitorCount() - (fullRendererReplacementInstalled() ? 1 : 0);
         float factor = 1.0f - competitors * 0.10f;
-        return Math.max(factor, 0.5f);
+
+        // ZGC concurrent phases need 1-2 free cores to avoid thread contention and frame latency.
+        if (isZgcActive()) {
+            factor *= 0.75f;
+        }
+
+        return Math.max(factor, 0.25f);
+    }
+
+    /** @return true if ZGC is currently active in the JVM. */
+    public static boolean isZgcActive() {
+        try {
+            return destiny.renderer.jvm.JvmArgumentAnalyzer.getReport().gc() == destiny.renderer.jvm.JvmArgumentAnalyzer.GcType.ZGC;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**
