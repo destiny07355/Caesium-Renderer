@@ -49,6 +49,33 @@ public final class SceneManager {
             return published;
         }
 
+        // Fast path 2: ONLY camera moved and/or options changed.
+        // Bypasses rebuilding 2,000+ chunk section maps on frames where geometry did not change.
+        if (baseline != null) {
+            boolean hasStructuralChange = false;
+            RenderWorld.Camera newCamera = null;
+            RenderWorld.Options newOptions = null;
+
+            for (DeltaCommand command : drainBuffer) {
+                if (command instanceof DeltaCommand.CameraMoved cm) {
+                    newCamera = cm.camera();
+                } else if (command instanceof DeltaCommand.OptionChanged oc) {
+                    newOptions = oc.options();
+                } else if (!(command instanceof DeltaCommand.Explosion)) {
+                    hasStructuralChange = true;
+                    break;
+                }
+            }
+
+            if (!hasStructuralChange) {
+                revision++;
+                RenderWorld.Camera cam = newCamera != null ? newCamera : baseline.camera();
+                RenderWorld.Options opt = newOptions != null ? newOptions : baseline.options();
+                published = baseline.withCameraAndOptions(revision, cam, opt);
+                return published;
+            }
+        }
+
         RenderWorld.Builder builder = baseline != null
                 ? baseline.toBuilder()
                 : new RenderWorld.Builder(defaultCamera(), defaultOptions());

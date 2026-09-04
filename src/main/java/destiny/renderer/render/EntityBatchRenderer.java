@@ -35,8 +35,24 @@ public final class EntityBatchRenderer {
     private static final int MAX_VERTS_PER_BATCH = 131072;
     private static final int VERTEX_STRIDE = 4 * Float.BYTES; // x, y, z, uv packed = 16 bytes
 
-    // Per-texture-atlas vertex accumulation
-    private final Map<Integer, BatchAccumulator> batches = new HashMap<>();
+    public static final class BatchSlot {
+        int textureId = -1;
+        int startVertex = 0;
+        final BatchAccumulator accumulator = new BatchAccumulator();
+    }
+
+    private static final int MAX_SLOTS = 64;
+    private final BatchSlot[] slots = new BatchSlot[MAX_SLOTS];
+    private int activeSlotCount = 0;
+
+    private float[] unifiedVerts = new float[4096];
+    private java.nio.FloatBuffer unifiedNioBuffer = java.nio.FloatBuffer.wrap(unifiedVerts);
+
+    {
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            slots[i] = new BatchSlot();
+        }
+    }
 
     // OpenGL resources
     private int batchVBO;
@@ -79,7 +95,11 @@ public final class EntityBatchRenderer {
 
     /** Called at frame start to reset all entity batches. */
     public void beginFrame() {
-        batches.clear();
+        for (int i = 0; i < activeSlotCount; i++) {
+            slots[i].accumulator.reset();
+            slots[i].textureId = -1;
+        }
+        activeSlotCount = 0;
     }
 
     /**
@@ -91,7 +111,18 @@ public final class EntityBatchRenderer {
      * @param count          number of vertices
      */
     public void addEntity(int atlasTextureId, float[] vertices, int count) {
-        batches.computeIfAbsent(atlasTextureId, k -> new BatchAccumulator()).add(vertices, count);
+        for (int i = 0; i < activeSlotCount; i++) {
+            if (slots[i].textureId == atlasTextureId) {
+                slots[i].accumulator.add(vertices, count);
+                return;
+            }
+        }
+        if (activeSlotCount < MAX_SLOTS) {
+            BatchSlot slot = slots[activeSlotCount++];
+            slot.textureId = atlasTextureId;
+            slot.accumulator.reset();
+            slot.accumulator.add(vertices, count);
+        }
     }
 
     /**
@@ -102,40 +133,70 @@ public final class EntityBatchRenderer {
      * @param viewMatrix       16-float column-major view matrix
      */
     public void flushAndRender(float[] projectionMatrix, float[] viewMatrix) {
-        if (batches.isEmpty() || batchShader == 0) return;
+        if (activeSlotCount == 0 || batchShader == 0) return;
+        destiny.renderer.hud.CaesiumFrameProfiler.beginEntities();
+        try {
+            int totalVerts = 0;
+            for (int i = 0; i < activeSlotCount; i++) {
+                totalVerts += slots[i].accumulator.vertCount;
+            }
+            if (totalVerts == 0) return;
 
-        GL20.glUseProgram(batchShader);
-        GL20.glUniformMatrix4fv(uProjection, false, projectionMatrix);
-        GL20.glUniformMatrix4fv(uView,       false, viewMatrix);
+            int totalFloats = totalVerts * 4;
+            if (unifiedVerts.length < totalFloats) {
+                unifiedVerts = new float[Math.max(totalFloats, unifiedVerts.length * 2)];
+                unifiedNioBuffer = java.nio.FloatBuffer.wrap(unifiedVerts);
+            }
 
-        GL11.glEnable(GL11.GL_BLEND);
-        GL11.glEnable(GL11.GL_ALPHA_TEST);
-        GL30.glBindVertexArray(batchVAO);
-        GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, batchVBO);
+            int offset = 0;
+            int firstVertex = 0;
+            for (int i = 0; i < activeSlotCount; i++) {
+                BatchSlot slot = slots[i];
+                int count = slot.accumulator.vertCount;
+                if (count == 0) continue;
+                slot.startVertex = firstVertex;
+                System.arraycopy(slot.accumulator.verts, 0, unifiedVerts, offset, count * 4);
+                offset += count * 4;
+                firstVertex += count;
+            }
 
-        for (Map.Entry<Integer, BatchAccumulator> entry : batches.entrySet()) {
-            int textureId = entry.getKey();
-            BatchAccumulator acc = entry.getValue();
-            if (acc.vertCount == 0) continue;
+            GL20.glUseProgram(batchShader);
+            GL20.glUniformMatrix4fv(uProjection, false, projectionMatrix);
+            GL20.glUniformMatrix4fv(uView,       false, viewMatrix);
 
-            // Upload this batch's vertex data
-            GL15.glBufferSubData(GL15.GL_ARRAY_BUFFER, 0L,
-                java.nio.FloatBuffer.wrap(acc.verts, 0, acc.vertCount * 4));
+            GL11.glEnable(GL11.GL_BLEND);
+            GL30.glBindVertexArray(batchVAO);
+            GL15.glBindBuffer(GL15.GL_ARRAY_BUFFER, batchVBO);
 
-            // Bind texture
+            // Single unified upload for all entity vertices this frame
+            unifiedNioBuffer.position(0);
+            unifiedNioBuffer.limit(totalFloats);
+            GL15.glBufferSubData(GL15.GL_ARRAY_BUFFER, 0L, unifiedNioBuffer);
+
+            // Single texture sampler setup
             GL13.glActiveTexture(GL13.GL_TEXTURE0);
-            GL11.glBindTexture(GL11.GL_TEXTURE_2D, textureId);
             GL20.glUniform1i(uTexture, 0);
 
-            // Draw as quads (via two-triangle sets)
-            int quadCount = acc.vertCount / 4;
-            GL11.glDrawArrays(GL11.GL_TRIANGLES, 0, acc.vertCount);
-        }
+            int lastBoundTexture = -1;
+            for (int i = 0; i < activeSlotCount; i++) {
+                BatchSlot slot = slots[i];
+                int count = slot.accumulator.vertCount;
+                if (count == 0) continue;
 
-        GL30.glBindVertexArray(0);
-        GL11.glDisable(GL11.GL_ALPHA_TEST);
-        GL11.glDisable(GL11.GL_BLEND);
-        GL20.glUseProgram(0);
+                if (lastBoundTexture != slot.textureId) {
+                    GL11.glBindTexture(GL11.GL_TEXTURE_2D, slot.textureId);
+                    lastBoundTexture = slot.textureId;
+                }
+
+                GL11.glDrawArrays(GL11.GL_TRIANGLES, slot.startVertex, count);
+            }
+
+            GL30.glBindVertexArray(0);
+            GL11.glDisable(GL11.GL_BLEND);
+            GL20.glUseProgram(0);
+        } finally {
+            destiny.renderer.hud.CaesiumFrameProfiler.endEntities();
+        }
     }
 
     public void shutdown() {
@@ -151,6 +212,11 @@ public final class EntityBatchRenderer {
     private static final class BatchAccumulator {
         float[] verts = new float[1024]; // start small, grow as needed
         int vertCount = 0;
+        java.nio.FloatBuffer nioBuffer = java.nio.FloatBuffer.wrap(verts);
+
+        void reset() {
+            vertCount = 0;
+        }
 
         void add(float[] src, int count) {
             int needed = count * 4;
@@ -162,9 +228,16 @@ public final class EntityBatchRenderer {
                     if (required > newSize) return; // batch full
                 }
                 verts = java.util.Arrays.copyOf(verts, newSize);
+                nioBuffer = java.nio.FloatBuffer.wrap(verts);
             }
             System.arraycopy(src, 0, verts, vertCount * 4, needed);
             vertCount += count;
+        }
+
+        java.nio.FloatBuffer getUploadBuffer() {
+            nioBuffer.position(0);
+            nioBuffer.limit(vertCount * 4);
+            return nioBuffer;
         }
     }
 

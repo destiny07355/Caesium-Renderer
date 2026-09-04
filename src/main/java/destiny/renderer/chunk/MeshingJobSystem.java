@@ -34,7 +34,7 @@ public final class MeshingJobSystem {
     /** Shared scheduler for delayed re-meshing retries. Replaces spawning a Thread per failure. */
     private final ScheduledExecutorService retryScheduler;
 
-    private final ConcurrentHashMap<ChunkSectionPos, PrioritizedMeshingTask> pendingTasks = new ConcurrentHashMap<>();
+    private final UnboxedLongTaskTable pendingTasks = new UnboxedLongTaskTable();
 
     private final ThreadLocal<ChunkMesher> threadLocalMesher = ThreadLocal.withInitial(ChunkMesher::new);
 
@@ -146,18 +146,19 @@ public final class MeshingJobSystem {
         }
 
         // Cancel any outstanding task for this position
-        PrioritizedMeshingTask existing = pendingTasks.get(pos);
+        long posKey = pos.asLong();
+        PrioritizedMeshingTask existing = pendingTasks.get(posKey);
         if (existing != null) {
             existing.cancel();
         }
 
         PrioritizedMeshingTask task = new PrioritizedMeshingTask(pos, data);
-        pendingTasks.put(pos, task);
+        pendingTasks.put(posKey, task);
         executor.execute(task);
     }
 
     public void cancel(ChunkSectionPos pos) {
-        PrioritizedMeshingTask task = pendingTasks.remove(pos);
+        PrioritizedMeshingTask task = pendingTasks.remove(pos.asLong());
         if (task != null) {
             task.cancel();
         }
@@ -179,6 +180,7 @@ public final class MeshingJobSystem {
         private final ChunkSectionData data;
         private final long submitTime = System.nanoTime();
         private final int attempt;
+        private final double score;
         private volatile boolean cancelled = false;
 
         PrioritizedMeshingTask(ChunkSectionPos pos, ChunkSectionData data) {
@@ -189,6 +191,7 @@ public final class MeshingJobSystem {
             this.pos = pos;
             this.data = data;
             this.attempt = attempt;
+            this.score = computeTaskScore(pos);
         }
 
         void cancel() {
@@ -197,8 +200,9 @@ public final class MeshingJobSystem {
 
         @Override
         public void run() {
+            long key = pos.asLong();
             if (cancelled || !running) {
-                pendingTasks.remove(pos, this);
+                pendingTasks.remove(key, this);
                 return;
             }
 
@@ -216,7 +220,7 @@ public final class MeshingJobSystem {
                     scheduleRetry();
                 }
             } finally {
-                pendingTasks.remove(pos, this);
+                pendingTasks.remove(key, this);
             }
         }
 
@@ -231,7 +235,7 @@ public final class MeshingJobSystem {
                 retryScheduler.schedule(() -> {
                     if (!running || cancelled) return;
                     PrioritizedMeshingTask next = new PrioritizedMeshingTask(pos, null, attempt + 1);
-                    pendingTasks.put(pos, next);
+                    pendingTasks.put(pos.asLong(), next);
                     try {
                         executor.execute(next);
                     } catch (RejectedExecutionException ignored) {
@@ -245,9 +249,7 @@ public final class MeshingJobSystem {
 
         @Override
         public int compareTo(PrioritizedMeshingTask other) {
-            double s1 = computeTaskScore(this.pos);
-            double s2 = computeTaskScore(other.pos);
-            int cmp = Double.compare(s1, s2);
+            int cmp = Double.compare(this.score, other.score);
             if (cmp != 0) return cmp;
             return Long.compare(this.submitTime, other.submitTime); // FIFO tie-breaker
         }
@@ -276,8 +278,169 @@ public final class MeshingJobSystem {
             return score;
         }
     }
+
     /** Packs section XYZ into a single long key. 21 bits per axis covers ±1M chunks. */
     private static long packSectionKey(int x, int y, int z) {
         return ((long)(x & 0x1FFFFF)) | (((long)(y & 0x1FFFFF)) << 21) | (((long)(z & 0x1FFFFF)) << 42);
+    }
+
+    /**
+     * Primitive concurrent open-addressed hash table keyed by primitive long without boxing.
+     */
+    private static final class UnboxedLongTaskTable {
+        private static final int STRIPE_COUNT = 16;
+        private static final int STRIPE_MASK = STRIPE_COUNT - 1;
+
+        private static final class Stripe {
+            private int capacity = 64;
+            private int mask = capacity - 1;
+            private long[] keys = new long[capacity];
+            private PrioritizedMeshingTask[] values = new PrioritizedMeshingTask[capacity];
+            private boolean[] present = new boolean[capacity];
+            private int size = 0;
+
+            synchronized PrioritizedMeshingTask get(long key) {
+                int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+                int idx = hash & mask;
+                for (int i = 0; i < capacity; i++) {
+                    int slot = (idx + i) & mask;
+                    if (!present[slot]) return null;
+                    if (keys[slot] == key) return values[slot];
+                }
+                return null;
+            }
+
+            synchronized void put(long key, PrioritizedMeshingTask val) {
+                if (size >= capacity * 0.70) rehash();
+                int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+                int idx = hash & mask;
+                for (int i = 0; i < capacity; i++) {
+                    int slot = (idx + i) & mask;
+                    if (!present[slot] || keys[slot] == key) {
+                        if (!present[slot]) size++;
+                        keys[slot] = key;
+                        values[slot] = val;
+                        present[slot] = true;
+                        return;
+                    }
+                }
+            }
+
+            synchronized PrioritizedMeshingTask remove(long key) {
+                int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+                int idx = hash & mask;
+                for (int i = 0; i < capacity; i++) {
+                    int slot = (idx + i) & mask;
+                    if (!present[slot]) return null;
+                    if (keys[slot] == key) {
+                        PrioritizedMeshingTask prev = values[slot];
+                        present[slot] = false;
+                        values[slot] = null;
+                        size--;
+                        rehashCluster(slot);
+                        return prev;
+                    }
+                }
+                return null;
+            }
+
+            synchronized boolean remove(long key, PrioritizedMeshingTask expected) {
+                int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+                int idx = hash & mask;
+                for (int i = 0; i < capacity; i++) {
+                    int slot = (idx + i) & mask;
+                    if (!present[slot]) return false;
+                    if (keys[slot] == key) {
+                        if (values[slot] == expected) {
+                            present[slot] = false;
+                            values[slot] = null;
+                            size--;
+                            rehashCluster(slot);
+                            return true;
+                        }
+                        return false;
+                    }
+                }
+                return false;
+            }
+
+            private void rehashCluster(int hole) {
+                int next = (hole + 1) & mask;
+                while (present[next]) {
+                    long k = keys[next];
+                    PrioritizedMeshingTask v = values[next];
+                    present[next] = false;
+                    values[next] = null;
+                    size--;
+                    put(k, v);
+                    next = (next + 1) & mask;
+                }
+            }
+
+            private void rehash() {
+                int oldCap = capacity;
+                long[] oldKeys = keys;
+                PrioritizedMeshingTask[] oldVals = values;
+                boolean[] oldPres = present;
+
+                capacity <<= 1;
+                mask = capacity - 1;
+                keys = new long[capacity];
+                values = new PrioritizedMeshingTask[capacity];
+                present = new boolean[capacity];
+                size = 0;
+
+                for (int i = 0; i < oldCap; i++) {
+                    if (oldPres[i]) put(oldKeys[i], oldVals[i]);
+                }
+            }
+
+            synchronized void clear() {
+                java.util.Arrays.fill(present, false);
+                java.util.Arrays.fill(values, null);
+                size = 0;
+            }
+
+            synchronized int size() {
+                return size;
+            }
+        }
+
+        private final Stripe[] stripes = new Stripe[STRIPE_COUNT];
+
+        UnboxedLongTaskTable() {
+            for (int i = 0; i < STRIPE_COUNT; i++) stripes[i] = new Stripe();
+        }
+
+        private Stripe stripe(long key) {
+            int h = (int) (key ^ (key >>> 32));
+            return stripes[h & STRIPE_MASK];
+        }
+
+        PrioritizedMeshingTask get(long key) {
+            return stripe(key).get(key);
+        }
+
+        void put(long key, PrioritizedMeshingTask task) {
+            stripe(key).put(key, task);
+        }
+
+        PrioritizedMeshingTask remove(long key) {
+            return stripe(key).remove(key);
+        }
+
+        boolean remove(long key, PrioritizedMeshingTask expected) {
+            return stripe(key).remove(key, expected);
+        }
+
+        int size() {
+            int total = 0;
+            for (Stripe s : stripes) total += s.size();
+            return total;
+        }
+
+        void clear() {
+            for (Stripe s : stripes) s.clear();
+        }
     }
 }

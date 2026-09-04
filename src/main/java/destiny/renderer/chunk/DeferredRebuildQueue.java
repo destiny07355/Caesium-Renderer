@@ -42,83 +42,108 @@ public final class DeferredRebuildQueue {
     private static final PriorityQueue<Entry> pending =
         new PriorityQueue<>((a, b) -> Double.compare(a.score, b.score));
 
+    /** Lock-free incoming queue to eliminate contention between worker threads and the render thread. */
+    private static final java.util.concurrent.ConcurrentLinkedQueue<Entry> incoming =
+        new java.util.concurrent.ConcurrentLinkedQueue<>();
+
     /** Membership set so a section cannot be queued twice while it is already waiting. */
-    private static final Set<ChunkBuilder.BuiltChunk> queued = new HashSet<>();
+    private static final Set<ChunkBuilder.BuiltChunk> queued =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /** Hard ceiling; past this we stop deferring and let rebuilds run immediately. */
     private static final int MAX_PENDING = 4096;
 
-    private record Entry(ChunkBuilder.BuiltChunk chunk, double score) {}
+    private static final class Entry {
+        ChunkBuilder.BuiltChunk chunk;
+        double score;
+
+        Entry(ChunkBuilder.BuiltChunk chunk, double score) {
+            this.chunk = chunk;
+            this.score = score;
+        }
+
+        void set(ChunkBuilder.BuiltChunk chunk, double score) {
+            this.chunk = chunk;
+            this.score = score;
+        }
+
+        ChunkBuilder.BuiltChunk chunk() { return chunk; }
+        double score() { return score; }
+    }
+
+    /** Non-blocking entry pool to eliminate allocation churn during rebuild bursts. */
+    private static final java.util.concurrent.ConcurrentLinkedQueue<Entry> entryPool =
+        new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+    private static Entry obtainEntry(ChunkBuilder.BuiltChunk chunk, double score) {
+        Entry e = entryPool.poll();
+        if (e != null) {
+            e.set(chunk, score);
+            return e;
+        }
+        return new Entry(chunk, score);
+    }
+
+    private static volatile double camX = 0.0, camY = 0.0, camZ = 0.0;
+    private static volatile double camLookX = 0.0, camLookY = 0.0, camLookZ = 1.0;
+    private static volatile boolean camReady = false;
+    private static volatile boolean isFlying = false;
 
     private DeferredRebuildQueue() {}
 
     /**
-     * Calculates view-cone aligned priority score (lower is higher priority).
-     * Sections directly in front of camera and closest to player are prioritized first.
+     * Progressive Teleport Streaming priority calculation:
+     * Pure arithmetic distance and dot-product scoring without sqrt or trigonometric calls.
+     * P0: Current player section (distSq < 256) -> -2,000,000 bonus
+     * P1: Forward visible view cone (< 60 deg cone) -> -1,000,000 bonus
+     * P2: Cardinal adjacent sections (horizontal/vertical) -> -400,000 bonus
+     * P3: Diagonals -> -100,000 bonus
+     * P4: Behind player -> +500,000 penalty
      */
     private static double calculatePriorityScore(ChunkBuilder.BuiltChunk chunk) {
         try {
-            MinecraftClient mc = MinecraftClient.getInstance();
-            if (mc == null || mc.gameRenderer == null) return Double.MAX_VALUE;
-            net.minecraft.client.render.Camera cam = mc.gameRenderer.getCamera();
-            if (cam == null || !cam.isReady()) {
-                if (mc.player == null) return Double.MAX_VALUE;
-                BlockPos origin = chunk.getOrigin();
-                double dx = origin.getX() - mc.player.getX();
-                double dy = origin.getY() - mc.player.getY();
-                double dz = origin.getZ() - mc.player.getZ();
-                return Math.sqrt(dx * dx + dy * dy + dz * dz);
-            }
-            net.minecraft.util.math.Vec3d pos = cam.getCameraPos();
             BlockPos origin = chunk.getOrigin();
-            double dx = (origin.getX() + 8.0) - pos.x;
-            double dy = (origin.getY() + 8.0) - pos.y;
-            double dz = (origin.getZ() + 8.0) - pos.z;
-            double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            double dx = (origin.getX() + 8.0) - camX;
+            double dy = (origin.getY() + 8.0) - camY;
+            double dz = (origin.getZ() + 8.0) - camZ;
+            double distSq = dx * dx + dy * dy + dz * dz;
 
-            double score = dist;
+            // P0: Immediate player section (< 16 blocks = 256 distSq)
+            if (distSq < 256.0) return distSq - 2_000_000.0;
 
-            // Immediate section bonus (within 16 blocks of player)
-            if (dist < 16.0) score -= 1000.0;
-
-            // View cone alignment: dot product with camera look direction
-            float yaw = cam.getYaw();
-            float pitch = cam.getPitch();
-            double radYaw = Math.toRadians(yaw);
-            double radPitch = Math.toRadians(pitch);
-            double lx = -Math.sin(radYaw) * Math.cos(radPitch);
-            double ly = -Math.sin(radPitch);
-            double lz = Math.cos(radYaw) * Math.cos(radPitch);
-
-            if (dist > 0.1) {
-                double dot = (dx * lx + dy * ly + dz * lz) / dist;
-                if (dot > 0.5) {
-                    // Directly in front of camera (~60 deg cone)
-                    score -= 500.0;
-                } else if (dot > 0.0) {
-                    // In front hemisphere
-                    score -= 200.0;
+            if (camReady) {
+                // Dot product with precomputed unit look vector
+                double dot = dx * camLookX + dy * camLookY + dz * camLookZ;
+                if (dot > 0.0) {
+                    // 60-degree cone check: dot / sqrt(distSq) > 0.5 <=> dot*dot > 0.25*distSq
+                    if (dot * dot > 0.25 * distSq) {
+                        return distSq - 1_000_000.0; // P1: Forward visible cone
+                    }
+                    if (Math.abs(dx) < 32.0 || Math.abs(dz) < 32.0) {
+                        return distSq - 400_000.0; // P2: Cardinal adjacent
+                    }
+                    return distSq - 100_000.0; // P3: Diagonals
                 } else {
-                    // Behind player
-                    score += 300.0;
+                    return distSq + 500_000.0; // P4: Behind player
                 }
             }
-            return score;
+            return distSq;
         } catch (Throwable t) {
             return Double.MAX_VALUE;
         }
     }
 
     /**
-     * Queues a section for a later rebuild.
+     * Queues a section for a later rebuild with zero lock contention and pooled entries.
      *
      * @return true if it was accepted, false if the caller should proceed immediately
      */
-    public static synchronized boolean defer(ChunkBuilder.BuiltChunk chunk) {
+    public static boolean defer(ChunkBuilder.BuiltChunk chunk) {
         if (chunk == null) return false;
-        if (pending.size() >= MAX_PENDING) return false;
-        if (!queued.add(chunk)) return true; // already waiting; drop duplicate request
-        pending.add(new Entry(chunk, calculatePriorityScore(chunk)));
+        if (queued.size() >= MAX_PENDING) return false;
+        if (!queued.add(chunk)) return true; // already waiting; drop duplicate request lock-free
+        double score = calculatePriorityScore(chunk);
+        incoming.add(obtainEntry(chunk, score));
         return true;
     }
 
@@ -204,15 +229,39 @@ public final class DeferredRebuildQueue {
             return;
         }
 
-        // Update wall-clock tracking.
-        long now = System.nanoTime();
-        lastTickStartNs = currentTickStartNs;
-        currentTickStartNs = now;
+        // Update camera coordinates, look direction, and player state for arithmetic priority scoring
+        var mc = MinecraftClient.getInstance();
+        if (mc != null && mc.gameRenderer != null) {
+            var cam = mc.gameRenderer.getCamera();
+            if (cam != null && cam.isReady()) {
+                var pos = cam.getCameraPos();
+                camX = pos.x;
+                camY = pos.y;
+                camZ = pos.z;
+                float yaw = cam.getYaw();
+                float pitch = cam.getPitch();
+                double radYaw = Math.toRadians(yaw);
+                double radPitch = Math.toRadians(pitch);
+                double cosP = Math.cos(radPitch);
+                camLookX = -Math.sin(radYaw) * cosP;
+                camLookY = -Math.sin(radPitch);
+                camLookZ = Math.cos(radYaw) * cosP;
+                camReady = true;
+            }
+            if (mc.player != null) {
+                isFlying = mc.player.isGliding() || mc.player.getAbilities().flying;
+            }
+        }
+
+        // Drain lock-free incoming submissions into priority pending queue
+        Entry incomingEntry;
+        while ((incomingEntry = incoming.poll()) != null) {
+            pending.add(incomingEntry);
+        }
 
         // Teleport burst detection: if the player moved more than the threshold in one
         // tick (e.g., /tp command), activate the burst budget multiplier.
         if (cfg.teleportBurstMultiplier > 1.0 && cfg.teleportBurstThreshold > 0) {
-            var mc = MinecraftClient.getInstance();
             if (mc != null && mc.player != null) {
                 double dx = mc.player.getX() - lastPlayerX;
                 double dy = mc.player.getY() - lastPlayerY;
@@ -227,15 +276,10 @@ public final class DeferredRebuildQueue {
                     if (dist > 100) {
                         // On long-range teleport, clear the old pending queue — stale sections
                         // from the old position waste the burst budget and delay loading new terrain.
-                        synchronized (DeferredRebuildQueue.class) {
-                            pending.clear();
-                            queued.clear();
-                        }
+                        incoming.clear();
+                        pending.clear();
+                        queued.clear();
                     }
-                }
-                // Flight / fast movement: prune trailing sections that fell far behind camera
-                if (mc.player != null && (mc.player.isGliding() || mc.player.getAbilities().flying) && pending.size() > 48) {
-                    pruneTrailingSections(mc.player);
                 }
 
                 lastPlayerX = mc.player.getX();
@@ -251,37 +295,6 @@ public final class DeferredRebuildQueue {
 
         boolean stillPending = runFirstSlice(base);
         runSecondSliceIfHeadroom(stillPending, frameLong, base);
-    }
-
-    /** Prunes sections far behind the player's look/flight vector so the CPU doesn't stall on trailing terrain. */
-    private static void pruneTrailingSections(net.minecraft.client.network.ClientPlayerEntity player) {
-        try {
-            double px = player.getX(), py = player.getY(), pz = player.getZ();
-            net.minecraft.util.math.Vec3d look = player.getRotationVecClient();
-            if (look == null) return;
-
-            synchronized (DeferredRebuildQueue.class) {
-                java.util.Iterator<Entry> it = pending.iterator();
-                while (it.hasNext()) {
-                    Entry e = it.next();
-                    if (e == null || e.chunk == null) continue;
-                    BlockPos origin = e.chunk.getOrigin();
-                    if (origin == null) continue;
-                    double dx = origin.getX() + 8.0 - px;
-                    double dy = origin.getY() + 8.0 - py;
-                    double dz = origin.getZ() + 8.0 - pz;
-                    double distSq = dx * dx + dy * dy + dz * dz;
-                    // If farther than 96 blocks and behind the flight direction
-                    if (distSq > 96.0 * 96.0) {
-                        double dot = dx * look.x + dy * look.y + dz * look.z;
-                        if (dot < -0.2) {
-                            queued.remove(e.chunk);
-                            it.remove();
-                        }
-                    }
-                }
-            }
-        } catch (Throwable ignored) {}
     }
 
     private static int computeBudget(boolean frameLong) {
@@ -314,6 +327,15 @@ public final class DeferredRebuildQueue {
         }
         if (frameLong) {
             base = Math.max(1, base / 4);
+        }
+
+        // Dynamic headroom budgeting: if frame has extra slack (> 2.5ms), allow progressive burst
+        if (currentTickStartNs > 0 && lastTickStartNs > 0) {
+            float elapsedMs = (currentTickStartNs - lastTickStartNs) / 1_000_000.0f;
+            float headroomMs = targetFrameMs() - elapsedMs;
+            if (headroomMs > 2.5f) {
+                base = Math.min(base * 2, 48);
+            }
         }
         return base;
     }
@@ -362,48 +384,71 @@ public final class DeferredRebuildQueue {
     private static int runSlice(int budget) {
         int spent = 0;
         for (int i = 0; i < budget; i++) {
-            ChunkBuilder.BuiltChunk chunk;
-            synchronized (DeferredRebuildQueue.class) {
-                Entry e = pending.poll();
-                if (e == null) return spent;
-                chunk = e.chunk();
-                queued.remove(chunk);
+            Entry e = pending.poll();
+            if (e == null) return spent;
+            ChunkBuilder.BuiltChunk chunk = e.chunk();
+            queued.remove(chunk);
+
+            // Lazy incremental pruning: during fast flight, drop sections trailing far behind camera
+            if (isFlying && camReady && isStaleTrailing(chunk)) {
+                entryPool.offer(e);
+                i--; // don't count towards rebuild budget
+                continue;
             }
+
             try {
                 // Marked important so this pass is not intercepted and deferred again.
                 chunk.scheduleRebuild(true);
             } catch (Throwable ignored) {
                 // A section unloaded while queued; nothing to rebuild.
             }
+            entryPool.offer(e);
             spent++;
         }
         return spent;
     }
 
+    private static boolean isStaleTrailing(ChunkBuilder.BuiltChunk chunk) {
+        BlockPos origin = chunk.getOrigin();
+        if (origin == null) return false;
+        double dx = origin.getX() + 8.0 - camX;
+        double dy = origin.getY() + 8.0 - camY;
+        double dz = origin.getZ() + 8.0 - camZ;
+        double distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq > 96.0 * 96.0) {
+            double dot = dx * camLookX + dy * camLookY + dz * camLookZ;
+            return dot < -0.2;
+        }
+        return false;
+    }
+
     /** Flushes everything immediately, used when deferral is switched off. */
     private static void drainAll() {
+        Entry in;
+        while ((in = incoming.poll()) != null) {
+            pending.add(in);
+        }
         while (true) {
-            ChunkBuilder.BuiltChunk chunk;
-            synchronized (DeferredRebuildQueue.class) {
-                Entry e = pending.poll();
-                if (e == null) return;
-                chunk = e.chunk();
-                queued.remove(chunk);
-            }
+            Entry e = pending.poll();
+            if (e == null) return;
+            ChunkBuilder.BuiltChunk chunk = e.chunk();
+            queued.remove(chunk);
             try {
                 chunk.scheduleRebuild(true);
             } catch (Throwable ignored) {
             }
+            entryPool.offer(e);
         }
     }
 
     /** Drops everything, e.g. on world change where the sections no longer exist. */
-    public static synchronized void clear() {
+    public static void clear() {
+        incoming.clear();
         pending.clear();
         queued.clear();
     }
 
-    public static synchronized int size() {
-        return pending.size();
+    public static int size() {
+        return queued.size();
     }
 }

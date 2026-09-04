@@ -10,7 +10,7 @@ public final class SoftwareOcclusionCuller {
 
     private final float[] depthBuffer = new float[BUFFER_SIZE];
     private final float[] mvpMatrix = new float[16];
-    private boolean enabled = true;
+    private boolean enabled = false;
 
     private final float[] cornerX = new float[8];
     private final float[] cornerY = new float[8];

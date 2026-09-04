@@ -8,6 +8,7 @@ import destiny.renderer.hardware.HardwarePreset;
 import destiny.renderer.memory.RendererArenaManager;
 import destiny.renderer.render.*;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
 import net.minecraft.client.MinecraftClient;
@@ -60,10 +61,17 @@ public final class DestinyRenderer implements ClientModInitializer {
     // ClientModInitializer
     // -------------------------------------------------------------------------
 
+    public static String getVersion() {
+        return FabricLoader.getInstance().getModContainer("caesium")
+            .map(c -> c.getMetadata().getVersion().getFriendlyString())
+            .orElse("2.0.4");
+    }
+
     @Override
     public void onInitializeClient() {
+        String ver = getVersion();
         LOGGER.info("======================================================");
-        LOGGER.info(" Caesium v2.0.1 — Initializing");
+        LOGGER.info(" Caesium v" + ver + " — Initializing");
         LOGGER.info(" Client-side performance suite for Minecraft 1.21.11");
         LOGGER.info(" Minecraft 1.21.11 | Fabric | Java 25+");
         LOGGER.info(" Built by Destiny073");

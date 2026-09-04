@@ -13,7 +13,7 @@ public final class EnginePipelineBenchmarkTest {
 
     public static void main(String[] args) {
         System.out.println("===============================================================================");
-        System.out.println(" CAESIUM v2.0.1 — ENGINE PIPELINE BENCHMARK SUITE");
+        System.out.println(" CAESIUM v2.0.4 — ENGINE PIPELINE BENCHMARK SUITE");
         System.out.println(" Testing on Java " + System.getProperty("java.version") + " (" + System.getProperty("os.name") + ")");
         System.out.println("===============================================================================\n");
 
@@ -153,9 +153,9 @@ public final class EnginePipelineBenchmarkTest {
         // SUMMARY SCORECARD
         // ---------------------------------------------------------------------
         System.out.println("===============================================================================");
-        System.out.println(" COMPARATIVE PERFORMANCE SUMMARY (Baseline vs Caesium v2.0.1)");
+        System.out.println(" COMPARATIVE PERFORMANCE SUMMARY (Baseline vs Caesium v2.0.4)");
         System.out.println("===============================================================================");
-        System.out.println(" Metric                     | Vanilla Baseline  | Caesium v2.0.1    | Improvement");
+        System.out.println(" Metric                     | Vanilla Baseline  | Caesium v2.0.4    | Improvement");
         System.out.println(" ---------------------------+-------------------+-------------------+--------------");
         System.out.printf(" Chunk Meshing Latency      | 2.400 ms          | %8.4f ms      | %5.1fx Faster\n",
             mesherAvgUs / 1000.0, 2.400 / (mesherAvgUs / 1000.0));

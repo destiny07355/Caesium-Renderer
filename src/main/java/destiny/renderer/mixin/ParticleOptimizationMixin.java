@@ -34,10 +34,6 @@ public abstract class ParticleOptimizationMixin {
     /** Rolling counter used for even density sampling. */
     private static int destinyrenderer$sampleAccum = 0;
 
-    /** Approximate live particle count, maintained locally to avoid touching internals. */
-    private static int destinyrenderer$liveEstimate = 0;
-    private static long destinyrenderer$lastDecayMs = 0L;
-
     @Inject(
         method = "addParticle(Lnet/minecraft/particle/ParticleEffect;DDDDDD)Lnet/minecraft/client/particle/Particle;",
         at = @At("HEAD"),
@@ -51,10 +47,10 @@ public abstract class ParticleOptimizationMixin {
     ) {
         if (!destiny.renderer.particle.CaesiumParticlePolicy.shouldSpawn(effect, x, y, z)) {
             cir.setReturnValue(null);
+        } else {
+            destiny.renderer.particle.CaesiumParticleMetrics.recordSpawn();
         }
     }
-
-
 
     /**
      * Block-break particles (mining), fireworks and a few other paths call
@@ -80,31 +76,9 @@ public abstract class ParticleOptimizationMixin {
         }
 
         if (cfg.maxParticleCount > 0) {
-            decayEstimate();
-            if (destinyrenderer$liveEstimate >= cfg.maxParticleCount) {
+            if (!destiny.renderer.particle.CaesiumParticleMetrics.checkAndRecordSpawn(cfg.maxParticleCount)) {
                 ci.cancel();
-                return;
             }
-            destinyrenderer$liveEstimate++;
-        }
-    }
-
-    /**
-     * Particles are short-lived, so rather than tracking every death we bleed the estimate
-     * down over time. This keeps the cap approximately correct without hooking removal.
-     */
-    private static void decayEstimate() {
-        long now = System.currentTimeMillis();
-        if (destinyrenderer$lastDecayMs == 0L) {
-            destinyrenderer$lastDecayMs = now;
-            return;
-        }
-        long elapsed = now - destinyrenderer$lastDecayMs;
-        if (elapsed >= 100L) {
-            int decaySteps = (int) (elapsed / 100L);
-            destinyrenderer$liveEstimate =
-                Math.max(0, destinyrenderer$liveEstimate - decaySteps * 40);
-            destinyrenderer$lastDecayMs = now;
         }
     }
 }

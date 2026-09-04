@@ -214,16 +214,35 @@ public final class OpenGLBackend implements GpuBackend {
     }
 
     private static final class Encoder implements GpuCommandEncoder {
+        private int boundProgram = 0;
+        private int boundVao = 0;
+        private int boundUbo = 0;
+
         @Override
         public void begin() {
+            boundProgram = 0;
+            boundVao = 0;
+            boundUbo = 0;
         }
 
         @Override
         public void bindPipeline(GpuPipeline pipeline) {
             if (pipeline instanceof Pipeline p) {
-                GL33.glUseProgram(p.program().program());
-                GL33.glBindVertexArray(p.vao());
-                GL33.glBindBufferBase(GL33.GL_UNIFORM_BUFFER, 0, p.defaultUbo());
+                int prog = p.program().program();
+                if (boundProgram != prog) {
+                    GL33.glUseProgram(prog);
+                    boundProgram = prog;
+                }
+                int vao = p.vao();
+                if (boundVao != vao) {
+                    GL33.glBindVertexArray(vao);
+                    boundVao = vao;
+                }
+                int ubo = p.defaultUbo();
+                if (boundUbo != ubo) {
+                    GL33.glBindBufferBase(GL33.GL_UNIFORM_BUFFER, 0, ubo);
+                    boundUbo = ubo;
+                }
             }
         }
 

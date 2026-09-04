@@ -72,12 +72,13 @@ public final class FrameScheduler {
     /** Executes the compiled graph into the device's frame-in-flight slot. */
     public void execute(FrameInput input) {
         long start = System.nanoTime();
-        GraphCompiler.CompiledGraph compiled = graph.compile();
+        RenderPass[] order = graph.activeOrder();
 
         FrameContext frame = device.beginFrame();
         GpuCommandEncoder encoder = frame.encoder();
         encoder.begin();
-        for (RenderPass pass : compiled.order()) {
+        for (int i = 0; i < order.length; i++) {
+            RenderPass pass = order[i];
             if (!pass.hasWork(frame)) {
                 continue; // pass culling
             }

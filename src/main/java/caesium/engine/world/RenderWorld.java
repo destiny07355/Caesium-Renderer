@@ -87,6 +87,18 @@ public final class RenderWorld {
         return particles;
     }
 
+    /**
+     * Fast-path: updates camera and/or options while preserving existing section/entity lists.
+     * Eliminates rebuilding 2,000+ chunk section maps on frames where only the camera moved.
+     */
+    public RenderWorld withCameraAndOptions(long revision, Camera camera, Options options) {
+        return new RenderWorld(revision, camera, options, this.sections, this.entities, this.particles);
+    }
+
+    public RenderWorld withCamera(long revision, Camera camera) {
+        return new RenderWorld(revision, camera, this.options, this.sections, this.entities, this.particles);
+    }
+
     public Builder toBuilder() {
         return new Builder(this);
     }

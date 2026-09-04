@@ -53,6 +53,10 @@ public final class TranslucencySorter {
     /** First vertex index in the packed vertex buffer for each quad. */
     private final int[]   startVertices = new int[MAX_QUADS];
 
+    // Scratch buffers for zero-allocation sorting
+    private final float[] dist2 = new float[MAX_QUADS];
+    private final int[]   order = new int[MAX_QUADS];
+
     private int quadCount = 0;
 
     // -------------------------------------------------------------------------
@@ -113,8 +117,6 @@ public final class TranslucencySorter {
 
         // --- Build distance array for quick sort ---
         // Primary: sort by squared distance (back-to-front = descending distance)
-        float[] dist2 = new float[quadCount];
-        Integer[] order = new Integer[quadCount];
         for (int i = 0; i < quadCount; i++) {
             float dx = centreX[i] - camX;
             float dy = centreY[i] - camY;
@@ -123,8 +125,8 @@ public final class TranslucencySorter {
             order[i] = i;
         }
 
-        // Sort indices by descending distance
-        java.util.Arrays.sort(order, (a, b) -> Float.compare(dist2[b], dist2[a]));
+        // Sort indices by descending distance (back-to-front) — primitive in-place quicksort
+        quickSortDescending(order, dist2, 0, quadCount - 1);
 
         // Fast path: for small quad counts (< 32), distance-squared sorting is visually identical
         // and avoids building the O(Q^2) dependency graph and DFS.
@@ -223,6 +225,25 @@ public final class TranslucencySorter {
                 result[outIdx[0]++] = node;
             }
         }
+    }
+
+    private static void quickSortDescending(int[] arr, float[] keys, int low, int high) {
+        if (low >= high) return;
+        float pivot = keys[arr[(low + high) >>> 1]];
+        int i = low, j = high;
+        while (i <= j) {
+            while (keys[arr[i]] > pivot) i++;
+            while (keys[arr[j]] < pivot) j--;
+            if (i <= j) {
+                int tmp = arr[i];
+                arr[i] = arr[j];
+                arr[j] = tmp;
+                i++;
+                j--;
+            }
+        }
+        if (low < j) quickSortDescending(arr, keys, low, j);
+        if (i < high) quickSortDescending(arr, keys, i, high);
     }
 
     /** @return the number of quads registered since the last {@link #reset()}. */

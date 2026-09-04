@@ -94,8 +94,10 @@ public abstract class WorldRendererMixin {
         boolean bl,
         CallbackInfo ci
     ) {
+        destiny.renderer.hud.CaesiumFrameProfiler.beginAnimations();
         destiny.renderer.render.SpriteVisibilityTracker.capture(
             positionMatrix, viewMatrix, camera == null ? null : camera.getCameraPos());
+        destiny.renderer.hud.CaesiumFrameProfiler.endAnimations();
     }
 
     /**
@@ -157,7 +159,9 @@ public abstract class WorldRendererMixin {
         boolean bl,
         CallbackInfo ci
     ) {
+        destiny.renderer.hud.CaesiumFrameProfiler.beginChunkScheduling();
         destiny.renderer.chunk.DeferredRebuildQueue.processFrame();
+        destiny.renderer.hud.CaesiumFrameProfiler.endChunkScheduling();
     }
 
     /**

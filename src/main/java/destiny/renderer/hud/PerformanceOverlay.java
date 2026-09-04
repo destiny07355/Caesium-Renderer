@@ -83,6 +83,7 @@ public final class PerformanceOverlay {
     /** Records a frame. Called once per frame from the HUD mixin. */
     public static void recordFrame() {
         frameCounter++;
+        CaesiumFrameProfiler.beginFrame();
         long now = System.nanoTime();
         if (lastFrameNs != 0L) {
             long delta = now - lastFrameNs;
@@ -262,6 +263,9 @@ public final class PerformanceOverlay {
     /** Draws the overlay. Called from the HUD mixin after the rest of the HUD. */
     public static void render(DrawContext context, TextRenderer tr) {
         RendererConfig cfg = RendererConfig.get();
+        if (cfg.showCaesiumProfiler) {
+            CaesiumFrameProfiler.render(context, tr, 6, 40);
+        }
         if (cfg.fpsCounterPosition == 0 && !cfg.showCoordinates
             && !cfg.showMemoryUsage && !cfg.showPerfOverlay) {
             return;

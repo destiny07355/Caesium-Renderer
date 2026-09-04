@@ -104,7 +104,9 @@ public final class VulkanBackend implements GpuBackend {
     private int transferFamily = -1;
     private long commandPool;
     private final long[] commandBuffers = new long[FRAMES_IN_FLIGHT];
+    private final VkCommandBuffer[] vkCommandBuffers = new VkCommandBuffer[FRAMES_IN_FLIGHT];
     private final long[] fences = new long[FRAMES_IN_FLIGHT];
+    private VkQueue cachedGraphicsQueue;
 
     /** Frame slot selected by {@link #beginFrame(int)}; consumed by the next encoder. */
     private int currentFrameIndex;
@@ -404,6 +406,11 @@ public final class VulkanBackend implements GpuBackend {
             }
             device = new VkDevice(pDevice.get(0), physicalDevice, info);
             memFree(pDevice);
+
+            PointerBuffer pQueue = memAllocPointer(1);
+            VK10.vkGetDeviceQueue(device, graphicsFamily, 0, pQueue);
+            cachedGraphicsQueue = new VkQueue(pQueue.get(0), device);
+            memFree(pQueue);
         }
     }
 
@@ -433,6 +440,7 @@ public final class VulkanBackend implements GpuBackend {
             }
             for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
                 commandBuffers[i] = pBuffers.get(i);
+                vkCommandBuffers[i] = new VkCommandBuffer(commandBuffers[i], device);
             }
             memFree(pBuffers);
         }
@@ -518,7 +526,7 @@ public final class VulkanBackend implements GpuBackend {
                 VK10.vkWaitForFences(device, pFence, true, Long.MAX_VALUE);
                 VK10.vkResetFences(device, pFence);
             }
-            VK10.vkResetCommandBuffer(new VkCommandBuffer(commandBuffers[frameIndex], device), 0);
+            VK10.vkResetCommandBuffer(vkCommandBuffers[frameIndex], 0);
         }
     }
 
@@ -572,11 +580,7 @@ public final class VulkanBackend implements GpuBackend {
     }
 
     VkQueue graphicsVkQueue() {
-        try (MemoryStack stack = stackPush()) {
-            PointerBuffer pQueue = stack.mallocPointer(1);
-            VK10.vkGetDeviceQueue(device, graphicsFamily, 0, pQueue);
-            return new VkQueue(pQueue.get(0), device);
-        }
+        return cachedGraphicsQueue;
     }
 
     int findMemoryType(int typeBits, int propertyFlags) {

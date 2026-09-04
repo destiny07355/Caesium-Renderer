@@ -96,6 +96,8 @@ String value=RendererConfig.get().vulkanDevice;
 return value==null||value.isBlank()?"AUTO":value;
 }
 
+private static final List<FrameInput.Explosion> EMPTY_EXPLOSIONS = List.of();
+
 public static void render(){
 if(!started||engine==null)return;
 if(dormant())return;
@@ -104,10 +106,11 @@ if(mc==null||mc.world==null||mc.gameRenderer==null)return;
 Camera camera=mc.gameRenderer.getCamera();
 Vec3d pos=camera.getCameraPos();
 int vd=mc.options!=null?mc.options.getViewDistance().getValue():12;
-RenderWorld.Options opts=new RenderWorld.Options(mc.options.getGamma().getValue()>0.99,vd,1000,300);
-if(!opts.equals(lastOptions)){
-engine.scene().push(new DeltaCommand.OptionChanged(opts));
-lastOptions=opts;
+boolean fullbright = mc.options != null && mc.options.getGamma().getValue() > 0.99;
+if (lastOptions == null || lastOptions.fullbright() != fullbright || lastOptions.renderDistance() != vd) {
+    RenderWorld.Options opts = new RenderWorld.Options(fullbright, vd, 1000, 300);
+    engine.scene().push(new DeltaCommand.OptionChanged(opts));
+    lastOptions = opts;
 }
 if(Math.abs((float)pos.x-lastCamX)+Math.abs((float)pos.y-lastCamY)+Math.abs((float)pos.z-lastCamZ)>=CAMERA_PUSH_THRESHOLD){
 RenderWorld.Camera cam=new RenderWorld.Camera((float)pos.x,(float)pos.y,(float)pos.z,camera.getPitch(),camera.getYaw(),70f,mc.world.getTime());
@@ -116,12 +119,18 @@ lastCamX=(float)pos.x;
 lastCamY=(float)pos.y;
 lastCamZ=(float)pos.z;
 }
+destiny.renderer.hud.CaesiumFrameProfiler.beginWorldUpdate();
 RenderWorld world=engine.scene().update(engine.scene().published());
+destiny.renderer.hud.CaesiumFrameProfiler.endWorldUpdate();
 float deltaMs = (float) Math.max(1.0, destiny.renderer.hud.PerformanceOverlay.averageFrameMs());
-FrameInput input=new FrameInput(world,deltaMs,System.currentTimeMillis(),false,List.of());
+FrameInput input=new FrameInput(world,deltaMs,System.currentTimeMillis(),false,EMPTY_EXPLOSIONS);
 engine.scheduler().beginFrame(input);
+destiny.renderer.hud.CaesiumFrameProfiler.beginRenderGraph();
 engine.scheduler().execute(input);
+destiny.renderer.hud.CaesiumFrameProfiler.endRenderGraph();
+destiny.renderer.hud.CaesiumFrameProfiler.beginBackend();
 engine.scheduler().endFrame(input);
+destiny.renderer.hud.CaesiumFrameProfiler.endBackend();
 }
 
 private static final ThreadLocal<ChunkSectionData> threadLocalSectionData = ThreadLocal.withInitial(ChunkSectionData::new);

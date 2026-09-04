@@ -110,8 +110,7 @@ jar {
     from("LICENSE") {
         rename { "${it}_${project.archives_base_name}" }
     }
-    // Commercial release: strip development test frameworks and internal benchmark tools
-    exclude "destiny/renderer/bench/**"
+    // Commercial release: strip internal debug tools
     exclude "caesium/engine/debug/**"
 }
 

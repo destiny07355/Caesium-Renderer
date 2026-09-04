@@ -236,6 +236,8 @@ public final class RendererConfig {
     // --- Sodium Extra Others ---
     public boolean showFpsCounter = true;
     public boolean showCoords = false;
+    public volatile boolean showCaesiumProfiler = false;
+    public volatile boolean caesiumProfilerFullMode = false;
 
     // --- Discord RPC ---
     public volatile boolean enableDiscordRpc = false;

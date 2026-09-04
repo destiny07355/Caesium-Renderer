@@ -1181,6 +1181,16 @@ public final class OptionRegistry {
                 "Frametime (ms)")
                 .values(List.of("Frametime (ms)", "FPS Pacing", "Culling Ratio", "FFM Arena & Memory"))
                 .keywords("graph", "telemetry", "hud", "frametime", "fps"))
+            .add(bool("caesium_profiler", "Caesium Hot Path Profiler",
+                "Real-time microsecond CPU subsystem breakdown, GPU passes, hot-path allocations, and auto stress tracking.",
+                Impact.NONE,
+                () -> c.showCaesiumProfiler, v -> c.showCaesiumProfiler = v, false)
+                .keywords("profiler", "hot path", "microsecond", "stress", "caesium", "timing"))
+            .add(bool("caesium_profiler_full", "Detailed Profiler (CPU+GPU+Allocs)",
+                "Enables allocation counters, GPU pass timing, and stress mode analytics in the profiler. Disable for lightest CPU-only timing.",
+                Impact.LOW,
+                () -> c.caesiumProfilerFullMode, v -> c.caesiumProfilerFullMode = v, false)
+                .keywords("profiler", "allocations", "detailed", "gpu", "stress"))
             .build();
 
         return new OptionPage("overlays", Text.literal("Overlays"), List.of(hud));

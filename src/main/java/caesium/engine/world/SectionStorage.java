@@ -5,36 +5,38 @@ import java.util.Map;
 
 /**
  * Engine-side storage for section metadata and their current mesh revision/handle.
- * Mirrors the extracted world but keeps the authoritative copy of what has been meshed
- * and uploaded, independent of the immutable snapshots published to the render thread.
+ * Uses packed 64-bit coordinate keys to eliminate all heap allocation on queries.
  */
 public final class SectionStorage {
 
-    public record Key(long chunkX, long chunkZ, int y) {
+    /** Packs (chunkX, chunkZ, y) into a single 64-bit primitive key. */
+    public static long packKey(long chunkX, long chunkZ, int y) {
+        return (chunkX & 0x3FFFFFL) | ((chunkZ & 0x3FFFFFL) << 22) | (((long) y & 0xFFFFFL) << 44);
     }
 
-    private final Map<Key, RenderWorld.Section> sections = new HashMap<>();
-    private final Map<Key, RenderWorld.SectionMesh> meshes = new HashMap<>();
+    private final Map<Long, RenderWorld.Section> sections = new HashMap<>();
+    private final Map<Long, RenderWorld.SectionMesh> meshes = new HashMap<>();
 
     public void put(RenderWorld.Section section) {
-        sections.put(new Key(section.chunkX(), section.chunkZ(), section.y()), section);
+        sections.put(packKey(section.chunkX(), section.chunkZ(), section.y()), section);
     }
 
     public RenderWorld.Section get(long chunkX, long chunkZ, int y) {
-        return sections.get(new Key(chunkX, chunkZ, y));
+        return sections.get(packKey(chunkX, chunkZ, y));
     }
 
     public void putMesh(RenderWorld.SectionMesh mesh) {
-        meshes.put(new Key(mesh.chunkX(), mesh.chunkZ(), mesh.y()), mesh);
+        meshes.put(packKey(mesh.chunkX(), mesh.chunkZ(), mesh.y()), mesh);
     }
 
     public RenderWorld.SectionMesh getMesh(long chunkX, long chunkZ, int y) {
-        return meshes.get(new Key(chunkX, chunkZ, y));
+        return meshes.get(packKey(chunkX, chunkZ, y));
     }
 
     public void remove(long chunkX, long chunkZ, int y) {
-        sections.remove(new Key(chunkX, chunkZ, y));
-        meshes.remove(new Key(chunkX, chunkZ, y));
+        long key = packKey(chunkX, chunkZ, y);
+        sections.remove(key);
+        meshes.remove(key);
     }
 
     public int size() {

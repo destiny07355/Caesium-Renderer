@@ -37,8 +37,15 @@ public final class SpriteVisibilityTracker {
     /** Maximum new unclassified sections evaluated per scan to keep frame time < 0.2ms. */
     private static final int MAX_NEW_CLASSIFICATIONS_PER_SCAN = 16;
 
-    /** Cached per-section animated-category bitmask, keyed by packed section position. */
-    private static final ConcurrentHashMap<Long, Byte> SECTION_MASKS = new ConcurrentHashMap<>();
+    /** Cached per-section animated-category bitmask in an unboxed open-addressed primitive cache. */
+    private static final int CACHE_CAPACITY = 8192;
+    private static final int CACHE_MASK = CACHE_CAPACITY - 1;
+    private static final long[] CACHE_KEYS = new long[CACHE_CAPACITY];
+    private static final byte[] CACHE_MASKS = new byte[CACHE_CAPACITY];
+    private static final boolean[] CACHE_PRESENT = new boolean[CACHE_CAPACITY];
+    private static final java.lang.invoke.VarHandle PRESENT_VH =
+        java.lang.invoke.MethodHandles.arrayElementVarHandle(boolean[].class);
+    private static final Object CACHE_LOCK = new Object();
 
     private static volatile int visibleCategories = 0x1F;
     private static long lastScanMs = 0L;
@@ -80,6 +87,7 @@ public final class SpriteVisibilityTracker {
         lastScanMs = now;
 
         scan(client.world, cameraPosition);
+        SpriteAnimationController.updateFramePolicy();
     }
 
     private static void scan(World world, Vec3d camera) {
@@ -111,14 +119,14 @@ public final class SpriteVisibilityTracker {
                     if (!frustum.isSectionVisible(secMinX, secMinY, secMinZ)) continue;
 
                     long key = packSectionKey(cx, sy, cz);
-                    Byte cached = SECTION_MASKS.get(key);
+                    int cached = getCachedMask(key);
 
                     int mask;
-                    if (cached != null) {
-                        mask = cached & 0xFF;
+                    if (cached != -1) {
+                        mask = cached;
                     } else if (classifiedThisScan < MAX_NEW_CLASSIFICATIONS_PER_SCAN) {
                         mask = classifySection(chunk, sy, bottomSection);
-                        SECTION_MASKS.put(key, (byte) mask);
+                        putCachedMask(key, (byte) mask);
                         classifiedThisScan++;
                     } else {
                         // Under load, assume visible so we never drop frames computing masks
@@ -137,6 +145,38 @@ public final class SpriteVisibilityTracker {
         }
 
         visibleCategories = newVisibleCategories;
+    }
+
+    private static int getCachedMask(long key) {
+        int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+        int idx = hash & CACHE_MASK;
+        for (int i = 0; i < 16; i++) {
+            int slot = (idx + i) & CACHE_MASK;
+            boolean present = (boolean) PRESENT_VH.getAcquire(CACHE_PRESENT, slot);
+            if (!present) return -1;
+            if (CACHE_KEYS[slot] == key) return CACHE_MASKS[slot] & 0xFF;
+        }
+        return -1;
+    }
+
+    private static void putCachedMask(long key, byte mask) {
+        int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+        int idx = hash & CACHE_MASK;
+        synchronized (CACHE_LOCK) {
+            for (int i = 0; i < 16; i++) {
+                int slot = (idx + i) & CACHE_MASK;
+                boolean present = (boolean) PRESENT_VH.get(CACHE_PRESENT, slot);
+                if (!present || CACHE_KEYS[slot] == key) {
+                    CACHE_KEYS[slot] = key;
+                    CACHE_MASKS[slot] = mask;
+                    PRESENT_VH.setRelease(CACHE_PRESENT, slot, true);
+                    return;
+                }
+            }
+            CACHE_KEYS[idx] = key;
+            CACHE_MASKS[idx] = mask;
+            PRESENT_VH.setRelease(CACHE_PRESENT, idx, true);
+        }
     }
 
     private static int classifySection(WorldChunk chunk, int sectionCoord, int bottomSectionCoord) {
@@ -158,12 +198,24 @@ public final class SpriteVisibilityTracker {
 
     /** Drops the cached mask for a section that was rebuilt. */
     public static void invalidateSection(long sectionKey) {
-        SECTION_MASKS.remove(sectionKey);
+        int hash = (int) (sectionKey ^ (sectionKey >>> 32)) * 0x9E3779B9;
+        int idx = hash & CACHE_MASK;
+        synchronized (CACHE_LOCK) {
+            for (int i = 0; i < 16; i++) {
+                int slot = (idx + i) & CACHE_MASK;
+                if ((boolean) PRESENT_VH.get(CACHE_PRESENT, slot) && CACHE_KEYS[slot] == sectionKey) {
+                    PRESENT_VH.setRelease(CACHE_PRESENT, slot, false);
+                    return;
+                }
+            }
+        }
     }
 
     /** Drops every cached mask, e.g. on world reload. */
     public static void invalidateAll() {
-        SECTION_MASKS.clear();
+        synchronized (CACHE_LOCK) {
+            java.util.Arrays.fill(CACHE_PRESENT, false);
+        }
         visibleCategories = 0x1F;
         lastScanMs = 0L;
     }
