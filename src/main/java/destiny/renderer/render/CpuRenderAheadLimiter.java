@@ -50,16 +50,15 @@ public final class CpuRenderAheadLimiter {
         if (!enabled) return;
         long fence = fences[cursor];
         if (fence != 0L) {
-            // Non-blocking poll first: on a healthy machine the fence is usually
-            // already signaled. Only when the CPU is genuinely N frames ahead do we
-            // wait, and even then for a bounded window so a slow or wedged driver
-            // cannot hang the render thread.
-            int res = GL32C.glClientWaitSync(fence, GL32C.GL_SYNC_FLUSH_COMMANDS_BIT, 0L);
-            if (res == GL32C.GL_TIMEOUT_EXPIRED) {
-                long deadline = System.nanoTime() + 2_000_000_000L; // 2 second hard timeout
-                do {
-                    res = GL32C.glClientWaitSync(fence, GL32C.GL_SYNC_FLUSH_COMMANDS_BIT, 100_000_000L);
-                } while (res == GL32C.GL_TIMEOUT_EXPIRED && System.nanoTime() < deadline);
+            long t0 = System.nanoTime();
+            int status = GL32C.glClientWaitSync(fence, GL32C.GL_SYNC_FLUSH_COMMANDS_BIT, 0L);
+            if (status == GL32C.GL_TIMEOUT_EXPIRED) {
+                // Tightly bounded micro-wait of at most 200 µs to enforce frame pacing without hitches
+                status = GL32C.glClientWaitSync(fence, GL32C.GL_SYNC_FLUSH_COMMANDS_BIT, 200_000L);
+            }
+            long elapsedNs = System.nanoTime() - t0;
+            if (elapsedNs > 0L) {
+                destiny.renderer.hud.CaesiumFrameProfiler.recordCpuGpuWait(elapsedNs / 1_000_000.0);
             }
             GL32C.glDeleteSync(fence);
             fences[cursor] = 0L;

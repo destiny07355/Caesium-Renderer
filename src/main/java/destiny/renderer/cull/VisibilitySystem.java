@@ -20,9 +20,13 @@ public final class VisibilitySystem {
      * Updates camera matrices and frustum planes for the current frame.
      */
     public static void updateFrame(float[] mvp, double camX, double camY, double camZ) {
+        destiny.renderer.hud.CaesiumFrameProfiler.beginVisibility();
         TERRAIN_FRUSTUM.update(mvp);
-        OCCLUSION_CULLER.beginFrame(mvp);
+        if (OCCLUSION_CULLER.isEnabled()) {
+            OCCLUSION_CULLER.beginFrame(mvp);
+        }
         EntityFrustumCuller.update(mvp, camX, camY, camZ);
+        destiny.renderer.hud.CaesiumFrameProfiler.endVisibility();
     }
 
     /**
@@ -30,7 +34,13 @@ public final class VisibilitySystem {
      */
     public static boolean isSectionVisible(int minX, int minY, int minZ) {
         // High-performance Fused Frustum Check (Bounding Sphere early-out + 6-plane AABB)
-        return TERRAIN_FRUSTUM.isSectionVisible(minX, minY, minZ);
+        if (!TERRAIN_FRUSTUM.isSectionVisible(minX, minY, minZ)) {
+            return false;
+        }
+        if (OCCLUSION_CULLER.isEnabled() && OCCLUSION_CULLER.isSectionOccluded(minX, minY, minZ)) {
+            return false;
+        }
+        return true;
     }
 
     /**

@@ -65,24 +65,24 @@ public final class PerformanceOverlay {
     /** @return a monotonically increasing frame index. */
     public static long frameCounter() { return frameCounter; }
 
+    private static volatile double cachedAvgMs = 16.67;
+
     /**
-     * @return recent average frame time in milliseconds, or 0 before any samples exist.
+     * @return recent average frame time in milliseconds, or 16.67 before any samples exist.
      *
      * <p>Used for adaptive backpressure: subsystems that queue optional work can check
      * this and back off while frames are already running long, rather than piling more
      * onto a frame that is struggling.
      */
     public static double averageFrameMs() {
-        int n = samplesFilled;
-        if (n == 0) return 0.0;
-        long total = 0L;
-        for (int i = 0; i < n; i++) total += frameTimesNs[i];
-        return (total / (double) n) / 1_000_000.0;
+        recompute();
+        return cachedAvgMs;
     }
 
     /** Records a frame. Called once per frame from the HUD mixin. */
     public static void recordFrame() {
         frameCounter++;
+        CaesiumFrameProfiler.beginFrame();
         long now = System.nanoTime();
         if (lastFrameNs != 0L) {
             long delta = now - lastFrameNs;
@@ -117,6 +117,7 @@ public final class PerformanceOverlay {
         }
 
         double avgNs = total / (double) samplesFilled;
+        cachedAvgMs = avgNs / 1_000_000.0;
         cachedAvg = avgNs > 0 ? (int) Math.round(1_000_000_000.0 / avgNs) : 0;
         cachedMin = worst > 0 ? (int) Math.round(1_000_000_000.0 / worst) : 0;
 
@@ -176,8 +177,7 @@ public final class PerformanceOverlay {
             cachedP995Ms = 0.0;
             return;
         }
-        // Sort once; all percentile reads share the same sorted array.
-        if (sortedScratch.length < n) sortedScratch = new long[n];
+        // Sort once into preallocated scratch; all percentile reads share the same sorted array.
         System.arraycopy(percentileTimesNs, 0, sortedScratch, 0, n);
         java.util.Arrays.sort(sortedScratch, 0, n);
 
@@ -204,19 +204,12 @@ public final class PerformanceOverlay {
 
     /**
      * @return the frame time in milliseconds at percentile {@code p} of the percentile
-     *         window, or 0 before any samples exist. Same sorted-window basis as
-     *         {@link #percentileLines()}.
+     *         window, or 0 before any samples exist. Reuses the pre-sorted scratch array.
      */
     private static double percentileFrameMs(double p) {
         int n = percentileFilled;
         if (n == 0) return 0.0;
-        int rank = (int) Math.ceil((p / 100.0) * n);
-        if (rank < 1) rank = 1;
-        if (rank > n) rank = n;
-        if (sortedScratch.length < n) sortedScratch = new long[n];
-        System.arraycopy(percentileTimesNs, 0, sortedScratch, 0, n);
-        java.util.Arrays.sort(sortedScratch, 0, n);
-        long v = sortedScratch[rank - 1];
+        long v = valueFromSorted(sortedScratch, n, p);
         return v > 0 ? v / 1_000_000.0 : 0.0;
     }
 
@@ -262,6 +255,9 @@ public final class PerformanceOverlay {
     /** Draws the overlay. Called from the HUD mixin after the rest of the HUD. */
     public static void render(DrawContext context, TextRenderer tr) {
         RendererConfig cfg = RendererConfig.get();
+        if (cfg.showCaesiumProfiler) {
+            CaesiumFrameProfiler.render(context, tr, 6, 40);
+        }
         if (cfg.fpsCounterPosition == 0 && !cfg.showCoordinates
             && !cfg.showMemoryUsage && !cfg.showPerfOverlay) {
             return;

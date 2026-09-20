@@ -3,7 +3,7 @@ package caesium.engine.gl;
 import caesium.engine.CaesiumEngine;
 import caesium.engine.backend.GpuBackend;
 import caesium.engine.backend.opengl.OpenGLBackend;
-import caesium.engine.debug.TerrainPass;
+import caesium.engine.render.TerrainPass;
 import caesium.engine.scheduler.FrameInput;
 import caesium.engine.world.CubeMeshBuilder;
 import caesium.engine.world.DeltaCommand;
@@ -67,9 +67,42 @@ public final class HeadlessTerrainGlTest {
 
             engine.scene().push(new DeltaCommand.CameraMoved(
                     new RenderWorld.Camera(8f, 8f, 0f, 0f, 0f, 70f, 0L)));
-            engine.scene().push(new DeltaCommand.SectionMeshUpdated(
-                    CubeMeshBuilder.cube(0, 0, 0, 1, 8f, 8f, 8f, 1f)));
+            RenderWorld.SectionMesh cube = CubeMeshBuilder.cube(0, 0, 0, 1, 8f, 8f, 8f, 1f);
+            int vertices = cube.positions().length / 3;
+            float[] uvs = new float[vertices * 2];
+            int[] colors = new int[vertices];
+            int[] lights = new int[vertices];
+            byte[] normals = new byte[vertices];
+            for (int i = 0; i < vertices; i++) {
+                uvs[i * 2] = 0.5f;
+                uvs[i * 2 + 1] = 0.5f;
+                int r = Math.round(cube.colors()[i * 4] * 255f);
+                int g = Math.round(cube.colors()[i * 4 + 1] * 255f);
+                int b = Math.round(cube.colors()[i * 4 + 2] * 255f);
+                int a = Math.round(cube.colors()[i * 4 + 3] * 255f);
+                colors[i] = (a << 24) | (r << 16) | (g << 8) | b;
+                lights[i] = 0xFF;
+            }
+            RenderWorld.LayerMesh solid = new RenderWorld.LayerMesh(RenderWorld.TerrainLayer.SOLID,
+                    cube.positions(), uvs, colors, lights, normals, cube.indices());
+            engine.scene().push(new DeltaCommand.LayeredSectionMeshUpdated(
+                    new RenderWorld.LayeredSectionMesh(0, 0, 0, 1, List.of(solid), false, true)));
             RenderWorld world = engine.scene().update(null);
+
+            int whiteTexture = GL33.glGenTextures();
+            ByteBuffer white = MemoryUtil.memAlloc(4);
+            white.put(0, (byte) 0xFF).put(1, (byte) 0xFF).put(2, (byte) 0xFF).put(3, (byte) 0xFF);
+            GL33.glActiveTexture(GL33.GL_TEXTURE0);
+            GL33.glBindTexture(GL33.GL_TEXTURE_2D, whiteTexture);
+            GL33.glTexImage2D(GL33.GL_TEXTURE_2D, 0, GL33.GL_RGBA8, 1, 1, 0,
+                    GL33.GL_RGBA, GL33.GL_UNSIGNED_BYTE, white);
+            GL33.glTexParameteri(GL33.GL_TEXTURE_2D, GL33.GL_TEXTURE_MIN_FILTER, GL33.GL_NEAREST);
+            GL33.glTexParameteri(GL33.GL_TEXTURE_2D, GL33.GL_TEXTURE_MAG_FILTER, GL33.GL_NEAREST);
+            GL33.glActiveTexture(GL33.GL_TEXTURE2);
+            GL33.glBindTexture(GL33.GL_TEXTURE_2D, whiteTexture);
+            MemoryUtil.memFree(white);
+            pass.configureLiveGroup(1 << RenderWorld.TerrainLayer.SOLID.ordinal(),
+                    1 << RenderWorld.TerrainLayer.SOLID.ordinal(), 1);
 
             FrameInput input = new FrameInput(world, 16.67f, System.currentTimeMillis(), false, List.of());
             engine.scheduler().beginFrame(input);
@@ -89,8 +122,10 @@ public final class HeadlessTerrainGlTest {
             check(r < 40 && g < 40 && b > 200,
                     "center pixel is the cube's -Z blue face (r=" + r + ",g=" + g + ",b=" + b + ")");
             check(engine.graph().passCount() == 1, "graph ran the terrain pass");
+            check(pass.lastExecution().valid(), "baked solid layer satisfied live coverage gate");
 
             engine.stop();
+            GL33.glDeleteTextures(whiteTexture);
             GLFW.glfwDestroyWindow(window);
         } finally {
             GLFW.glfwTerminate();

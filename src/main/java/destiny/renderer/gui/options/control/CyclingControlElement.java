@@ -10,12 +10,11 @@ import net.minecraft.client.gui.DrawContext;
 import java.util.List;
 
 /**
- * Cycling (multi-value) control. Left click advances, right click goes back.
- * Uses GuiRenderer.controlBox for background.
+ * Cycling (multi-value) control with title click detection.
  */
 public final class CyclingControlElement<T> extends ControlElement<T> {
 
-    private static final int BOX_W = CaesiumTheme.CYCLING_BOX_W;
+    private static final int BOX_W = 76;
 
     public CyclingControlElement(destiny.renderer.gui.options.Option<T> option,
                                  int x, int y, int width, int height) {
@@ -31,7 +30,6 @@ public final class CyclingControlElement<T> extends ControlElement<T> {
         int by = getY() + 2;
         int bh = height - 4;
 
-        // Box background
         GuiRenderer.controlBox(context, bx, by, BOX_W, bh, hovered, false, enabled);
 
         TextRenderer tr = MinecraftClient.getInstance().textRenderer;
@@ -47,11 +45,10 @@ public final class CyclingControlElement<T> extends ControlElement<T> {
         context.drawText(tr, CaesiumFont.text(text),
             bx + (BOX_W - tw) / 2, by + (bh - 8) / 2, textColor, false);
 
-        // Arrow hints on hover
         if (hovered && enabled) {
-            context.drawText(tr, CaesiumFont.text("<"), bx + 4, by + (bh - 8) / 2,
+            context.drawText(tr, CaesiumFont.text("<"), bx + 3, by + (bh - 8) / 2,
                 CaesiumTheme.TEXT_SECONDARY, false);
-            context.drawText(tr, CaesiumFont.text(">"), bx + BOX_W - 9, by + (bh - 8) / 2,
+            context.drawText(tr, CaesiumFont.text(">"), bx + BOX_W - 8, by + (bh - 8) / 2,
                 CaesiumTheme.TEXT_SECONDARY, false);
         }
     }
@@ -67,6 +64,10 @@ public final class CyclingControlElement<T> extends ControlElement<T> {
     @Override
     public void onClick(net.minecraft.client.gui.Click click, boolean doubled) {
         if (!this.active || !this.visible || !isOptionEnabled()) return;
+        if (isTitleArea(click.x())) {
+            if (onTitleClick != null) onTitleClick.accept(option);
+            return;
+        }
         this.playDownSound(MinecraftClient.getInstance().getSoundManager());
         cycle(click.button() == 1 ? -1 : 1);
     }

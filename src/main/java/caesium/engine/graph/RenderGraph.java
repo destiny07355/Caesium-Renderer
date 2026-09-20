@@ -14,18 +14,41 @@ public final class RenderGraph {
 
     private final List<RenderPass> passes = new ArrayList<>();
     private final Map<String, PassResource> resources = new LinkedHashMap<>();
-    private GraphCompiler.CompiledGraph cached;
+    private volatile GraphCompiler.CompiledGraph cached;
+    private volatile RenderPass[] activeOrder = new RenderPass[0];
 
-    public RenderGraph addResource(PassResource resource) {
+    public synchronized RenderGraph addResource(PassResource resource) {
         resources.put(resource.id(), resource);
-        cached = null;
+        publishNewGraph();
         return this;
     }
 
-    public RenderGraph addPass(RenderPass pass) {
+    public synchronized RenderGraph addPass(RenderPass pass) {
         passes.add(pass);
-        cached = null;
+        publishNewGraph();
         return this;
+    }
+
+    private void publishNewGraph() {
+        GraphCompiler.CompiledGraph c = new GraphCompiler(this).compile();
+        this.cached = c;
+        this.activeOrder = c.orderArray();
+    }
+
+    /** Direct zero-overhead access to pre-baked execution passes for the render hot loop. */
+    public RenderPass[] activeOrder() {
+        return activeOrder;
+    }
+
+    public GraphCompiler.CompiledGraph activeGraph() {
+        GraphCompiler.CompiledGraph c = cached;
+        if (c == null) {
+            synchronized (this) {
+                if (cached == null) publishNewGraph();
+                c = cached;
+            }
+        }
+        return c;
     }
 
     public PassResource resource(String id) {
@@ -40,17 +63,40 @@ public final class RenderGraph {
         return passes.size();
     }
 
+    public int activePassCount() {
+        int count = 0;
+        for (RenderPass pass : passes) {
+            if (pass.isEnabled()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     public int resourceCount() {
         return resources.size();
     }
 
+    /** Closes passes in reverse execution-registration order before device teardown. */
+    public synchronized void close() {
+        RuntimeException failure = null;
+        for (int i = passes.size() - 1; i >= 0; i--) {
+            try {
+                passes.get(i).close();
+            } catch (RuntimeException e) {
+                if (failure == null) failure = e;
+                else failure.addSuppressed(e);
+            }
+        }
+        passes.clear();
+        resources.clear();
+        activeOrder = new RenderPass[0];
+        cached = null;
+        if (failure != null) throw failure;
+    }
+
     /** Compiles the plan if the topology changed since last call, else returns the cache. */
     public GraphCompiler.CompiledGraph compile() {
-        GraphCompiler.CompiledGraph c = cached;
-        if (c == null) {
-            c = new GraphCompiler(this).compile();
-            cached = c;
-        }
-        return c;
+        return activeGraph();
     }
 }

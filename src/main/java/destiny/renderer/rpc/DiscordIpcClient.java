@@ -11,11 +11,13 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class DiscordIpcClient {
     private final String clientId;
     private FileChannel pipeChannel;
     private SocketChannel unixChannel;
+    private final AtomicLong nonce = new AtomicLong();
     
     public DiscordIpcClient(String clientId) {
         this.clientId = clientId;
@@ -75,31 +77,39 @@ public class DiscordIpcClient {
     }
     
     public synchronized boolean isConnected() {
-        return pipeChannel != null || unixChannel != null;
+        return (pipeChannel != null && pipeChannel.isOpen())
+            || (unixChannel != null && unixChannel.isOpen() && unixChannel.isConnected());
     }
     
     public synchronized void clearActivity() {
         if (!isConnected()) return;
-        String payload = "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" + ProcessHandle.current().pid() + "},\"nonce\":\"1\"}";
+        String payload = commandPayload(null, ProcessHandle.current().pid(), nonce.incrementAndGet());
         sendFrame(1, payload);
     }
 
     public synchronized void sendActivity(String jsonPayload) {
         if (!isConnected()) return;
         
-        String payload = "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" + ProcessHandle.current().pid() + ",\"activity\":" + jsonPayload + "},\"nonce\":\"1\"}";
+        String payload = commandPayload(jsonPayload, ProcessHandle.current().pid(), nonce.incrementAndGet());
         sendFrame(1, payload);
+    }
+
+    static String commandPayload(String activity, long pid, long nonce) {
+        String activityField = activity == null ? "" : ",\"activity\":" + activity;
+        return "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" + pid + activityField
+            + "},\"nonce\":\"" + nonce + "\"}";
+    }
+
+    static ByteBuffer encodeFrame(int opcode, String payload) {
+        byte[] data = payload.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buffer = ByteBuffer.allocate(8 + data.length).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putInt(opcode).putInt(data.length).put(data).flip();
+        return buffer;
     }
     
     private void sendFrame(int opcode, String payload) {
         try {
-            byte[] data = payload.getBytes(StandardCharsets.UTF_8);
-            ByteBuffer buffer = ByteBuffer.allocate(8 + data.length);
-            buffer.order(ByteOrder.LITTLE_ENDIAN);
-            buffer.putInt(opcode);
-            buffer.putInt(data.length);
-            buffer.put(data);
-            buffer.flip();
+            ByteBuffer buffer = encodeFrame(opcode, payload);
             
             if (pipeChannel != null) {
                 while (buffer.hasRemaining()) pipeChannel.write(buffer);

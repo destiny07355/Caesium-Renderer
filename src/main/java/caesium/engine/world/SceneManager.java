@@ -1,11 +1,16 @@
 package caesium.engine.world;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Owns the double-buffered world state. The game thread pushes {@link DeltaCommand}s
- * (never blocking), the extraction thread drains them into a copy-on-write {@code Builder}
+ * (never blocking), the extraction thread drains them into a persistent store
  * and publishes the new revision atomically. The render thread reads {@link #published()}.
  */
 public final class SceneManager {
@@ -15,6 +20,26 @@ public final class SceneManager {
     private final SectionStorage sections = new SectionStorage();
     private volatile RenderWorld published;
     private long revision;
+
+    // Persistent storage avoiding full-scene LinkedHashMap/List/Set re-allocations per frame
+    private final Map<Long, RenderWorld.Section> sectionStore = new LinkedHashMap<>();
+    private final List<RenderWorld.Section> persistentSectionList = new ArrayList<>();
+    private final Map<Long, Integer> keyToIndex = new java.util.HashMap<>();
+    private final List<RenderWorld.Entity> entityStore = new ArrayList<>();
+    private final List<RenderWorld.ParticleBatch> particleStore = new ArrayList<>();
+    private List<RenderWorld.Section> cachedSectionList = List.of();
+    private Set<Long> cachedSectionKeys = Set.of();
+    private boolean sectionsDirty = false;
+    private boolean keysDirty = false;
+    private RenderWorld.Camera currentCamera = defaultCamera();
+    private RenderWorld.Options currentOptions = defaultOptions();
+
+    // Throttled pruning state
+    private float lastPruneX = Float.NaN;
+    private float lastPruneY = Float.NaN;
+    private float lastPruneZ = Float.NaN;
+    private int lastPruneRenderDist = -1;
+    private int pruneFrameCounter = 0;
 
     /** Called from the game thread. Bounded in practice by the queue drain below. */
     public void push(DeltaCommand command) {
@@ -45,20 +70,62 @@ public final class SceneManager {
 
         // Fast path: nothing changed this frame. The published snapshot is returned
         // as-is, so idle frames cost no copy and allocate nothing.
-        if (drainBuffer.isEmpty() && published != null) {
+        if (drainBuffer.isEmpty() && published != null && !sectionsDirty && !keysDirty) {
             return published;
         }
 
-        RenderWorld.Builder builder = baseline != null
-                ? baseline.toBuilder()
-                : new RenderWorld.Builder(defaultCamera(), defaultOptions());
+        // Synchronize external baseline on initial bootstrap if sectionStore is empty but baseline has sections
+        if (published == null && baseline != null && sectionStore.isEmpty() && baseline.sections() != null && !baseline.sections().isEmpty()) {
+            for (RenderWorld.Section s : baseline.sections()) {
+                long key = SectionStorage.packKey(s.chunkX(), s.chunkZ(), s.y());
+                sectionStore.put(key, s);
+                sections.put(s);
+                keyToIndex.put(key, persistentSectionList.size());
+                persistentSectionList.add(s);
+            }
+            sectionsDirty = true;
+            keysDirty = true;
+        }
+
+        // Fast path 2: ONLY camera moved and/or options changed.
+        // Bypasses rebuilding chunk section maps on frames where geometry did not change.
+        if (baseline != null) {
+            boolean hasStructuralChange = sectionsDirty || keysDirty;
+            RenderWorld.Camera newCamera = null;
+            RenderWorld.Options newOptions = null;
+
+            for (DeltaCommand command : drainBuffer) {
+                if (command instanceof DeltaCommand.CameraMoved cm) {
+                    newCamera = cm.camera();
+                } else if (command instanceof DeltaCommand.OptionChanged oc) {
+                    newOptions = oc.options();
+                } else if (!(command instanceof DeltaCommand.Explosion)) {
+                    hasStructuralChange = true;
+                    break;
+                }
+            }
+
+            if (!hasStructuralChange) {
+                revision++;
+                if (newCamera != null) currentCamera = newCamera;
+                if (newOptions != null) currentOptions = newOptions;
+                published = baseline.withCameraAndOptions(revision, currentCamera, currentOptions);
+                return published;
+            }
+        }
+
+        if (baseline != null) {
+            if (baseline.camera() != null) currentCamera = baseline.camera();
+            if (baseline.options() != null) currentOptions = baseline.options();
+        }
 
         for (DeltaCommand command : drainBuffer) {
             switch (command) {
-                case DeltaCommand.CameraMoved cm -> builder.camera(cm.camera());
-                case DeltaCommand.OptionChanged oc -> builder.options(oc.options());
-                case DeltaCommand.SectionDirty sd -> markSectionDirty(builder, sd);
-                case DeltaCommand.SectionMeshUpdated sm -> markSectionMesh(builder, sm.mesh());
+                case DeltaCommand.CameraMoved cm -> currentCamera = cm.camera();
+                case DeltaCommand.OptionChanged oc -> currentOptions = oc.options();
+                case DeltaCommand.SectionDirty sd -> markSectionDirty(sd);
+                case DeltaCommand.SectionMeshUpdated sm -> markSectionMesh(sm.mesh());
+                case DeltaCommand.LayeredSectionMeshUpdated lm -> markLayeredSectionMesh(lm.mesh());
                 case DeltaCommand.EntityUpdated eu -> {
                     // Flat-array pool update happens here once entity storage is in; no-op in the skeleton.
                 }
@@ -74,42 +141,124 @@ public final class SceneManager {
             }
         }
 
-        pruneFarSections(builder);
+        pruneFarSections();
+
+        if (sectionsDirty || cachedSectionList.isEmpty()) {
+            cachedSectionList = List.copyOf(persistentSectionList);
+            sectionsDirty = false;
+        }
+
+        if (keysDirty || cachedSectionKeys.isEmpty()) {
+            cachedSectionKeys = Set.copyOf(sectionStore.keySet());
+            keysDirty = false;
+        }
 
         revision++;
-        published = builder.revision(revision).build();
+        published = new RenderWorld(revision, currentCamera, currentOptions,
+                cachedSectionList, entityStore, particleStore, cachedSectionKeys);
         return published;
     }
 
     /**
      * Drops sections (and their stored meshes) that lie beyond the render distance plus a
-     * two-chunk margin around the camera. Without this, every chunk rebuild would append a
-     * fresh mesh and the storage would grow for the lifetime of the world — the unbounded
-     * growth that exhausted the heap.
+     * two-chunk margin around the camera. Throttled to avoid scanning thousands of sections
+     * on every single frame.
      */
-    private void pruneFarSections(RenderWorld.Builder builder) {
-        RenderWorld.Camera camera = builder.camera();
-        RenderWorld.Options options = builder.options();
-        if (camera == null || options == null) {
+    private void pruneFarSections() {
+        if (currentCamera == null || currentOptions == null) {
             return;
         }
-        float limit = (options.renderDistance() + 2) * 16f;
-        builder.filterSections(s -> {
+        int rDist = currentOptions.renderDistance();
+        pruneFrameCounter++;
+        boolean shouldCheck = Float.isNaN(lastPruneX)
+                || Math.abs(currentCamera.x() - lastPruneX) >= 16f
+                || Math.abs(currentCamera.y() - lastPruneY) >= 16f
+                || Math.abs(currentCamera.z() - lastPruneZ) >= 16f
+                || rDist != lastPruneRenderDist
+                || pruneFrameCounter >= 60;
+
+        if (!shouldCheck) return;
+
+        lastPruneX = currentCamera.x();
+        lastPruneY = currentCamera.y();
+        lastPruneZ = currentCamera.z();
+        lastPruneRenderDist = rDist;
+        pruneFrameCounter = 0;
+
+        float limit = (rDist + 2) * 16f;
+        float vertLimit = 512f;
+
+        var it = sectionStore.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            RenderWorld.Section s = entry.getValue();
             float cx = s.chunkX() * 16f + 8f;
             float cy = s.y() * 16f + 8f;
             float cz = s.chunkZ() * 16f + 8f;
-            int vertLimit = 32; // covers full world height in sections
-            boolean keep = Math.abs(cx - camera.x()) <= limit
-                    && Math.abs(cy - camera.y()) <= vertLimit
-                    && Math.abs(cz - camera.z()) <= limit;
+            boolean keep = Math.abs(cx - currentCamera.x()) <= limit
+                    && Math.abs(cy - currentCamera.y()) <= vertLimit
+                    && Math.abs(cz - currentCamera.z()) <= limit;
             if (!keep) {
+                it.remove();
                 sections.remove(s.chunkX(), s.chunkZ(), s.y());
+                sectionsDirty = true;
+                keysDirty = true;
             }
-            return keep;
-        });
+        }
+        if (sectionsDirty) {
+            persistentSectionList.clear();
+            keyToIndex.clear();
+            for (var entry : sectionStore.entrySet()) {
+                keyToIndex.put(entry.getKey(), persistentSectionList.size());
+                persistentSectionList.add(entry.getValue());
+            }
+        }
     }
 
-    private void markSectionDirty(RenderWorld.Builder builder, DeltaCommand.SectionDirty d) {
+    public synchronized void clear() {
+        synchronized (pending) {
+            pending.clear();
+        }
+        drainBuffer.clear();
+        sections.clear();
+        sectionStore.clear();
+        persistentSectionList.clear();
+        keyToIndex.clear();
+        entityStore.clear();
+        particleStore.clear();
+        cachedSectionList = List.of();
+        cachedSectionKeys = Set.of();
+        sectionsDirty = false;
+        keysDirty = false;
+        published = null;
+        revision = 0L;
+    }
+
+    public synchronized void removeChunk(long chunkX, long chunkZ) {
+        var it = sectionStore.entrySet().iterator();
+        boolean removed = false;
+        while (it.hasNext()) {
+            var entry = it.next();
+            RenderWorld.Section s = entry.getValue();
+            if (s.chunkX() == chunkX && s.chunkZ() == chunkZ) {
+                it.remove();
+                sections.remove(s.chunkX(), s.chunkZ(), s.y());
+                removed = true;
+            }
+        }
+        if (removed) {
+            persistentSectionList.clear();
+            keyToIndex.clear();
+            for (var entry : sectionStore.entrySet()) {
+                keyToIndex.put(entry.getKey(), persistentSectionList.size());
+                persistentSectionList.add(entry.getValue());
+            }
+            sectionsDirty = true;
+            keysDirty = true;
+        }
+    }
+
+    private void markSectionDirty(DeltaCommand.SectionDirty d) {
         RenderWorld.Section s = sections.get(d.chunkX(), d.chunkZ(), d.y());
         if (s == null) {
             return;
@@ -119,7 +268,23 @@ public final class SceneManager {
                 s.revision() + 1, s.meshHandle(),
                 s.blockLight(), s.skyLight(), s.opaque());
         sections.put(updated);
-        builder.addSection(updated);
+        long key = SectionStorage.packKey(updated.chunkX(), updated.chunkZ(), updated.y());
+        boolean isNew = (sectionStore.put(key, updated) == null);
+        if (isNew) {
+            keyToIndex.put(key, persistentSectionList.size());
+            persistentSectionList.add(updated);
+            sectionsDirty = true;
+            keysDirty = true;
+        } else {
+            Integer idx = keyToIndex.get(key);
+            if (idx != null && idx < persistentSectionList.size()) {
+                persistentSectionList.set(idx, updated);
+            } else {
+                keyToIndex.put(key, persistentSectionList.size());
+                persistentSectionList.add(updated);
+                sectionsDirty = true;
+            }
+        }
     }
 
     /**
@@ -127,22 +292,77 @@ public final class SceneManager {
      * section was never seen before, a base metadata entry is created so the section list
      * and the mesh storage stay in sync (the terrain pass keys on both).
      */
-    private void markSectionMesh(RenderWorld.Builder builder, RenderWorld.SectionMesh mesh) {
-        sections.putMesh(mesh);
+    private void markSectionMesh(RenderWorld.SectionMesh mesh) {
         RenderWorld.Section s = sections.get(mesh.chunkX(), mesh.chunkZ(), mesh.y());
+        RenderWorld.SectionMesh currentMesh = sections.getMesh(mesh.chunkX(), mesh.chunkZ(), mesh.y());
+        int currentRevision = Math.max(s == null ? Integer.MIN_VALUE : s.revision(),
+            currentMesh == null ? Integer.MIN_VALUE : currentMesh.revision());
+        if (mesh.revision() <= currentRevision) {
+            return;
+        }
+        sections.putMesh(mesh);
         if (s == null) {
             s = new RenderWorld.Section(
                     mesh.chunkX(), mesh.chunkZ(), mesh.y(), mesh.revision(),
                     mesh.revision(), 0, 15, true);
-            sections.put(s);
         } else {
             s = new RenderWorld.Section(
                     s.chunkX(), s.chunkZ(), s.y(),
                     mesh.revision(), mesh.revision(),
                     s.blockLight(), s.skyLight(), s.opaque());
-            sections.put(s);
         }
-        builder.addSection(s);
+        sections.put(s);
+        long key = SectionStorage.packKey(s.chunkX(), s.chunkZ(), s.y());
+        boolean isNew = (sectionStore.put(key, s) == null);
+        if (isNew) {
+            keyToIndex.put(key, persistentSectionList.size());
+            persistentSectionList.add(s);
+            sectionsDirty = true;
+            keysDirty = true;
+        } else {
+            Integer idx = keyToIndex.get(key);
+            if (idx != null && idx < persistentSectionList.size()) {
+                persistentSectionList.set(idx, s);
+            } else {
+                keyToIndex.put(key, persistentSectionList.size());
+                persistentSectionList.add(s);
+                sectionsDirty = true;
+            }
+        }
+    }
+
+    private void markLayeredSectionMesh(RenderWorld.LayeredSectionMesh mesh) {
+        RenderWorld.Section s = sections.get(mesh.chunkX(), mesh.chunkZ(), mesh.y());
+        RenderWorld.LayeredSectionMesh current = sections.getLayeredMesh(mesh.chunkX(), mesh.chunkZ(), mesh.y());
+        int currentRevision = Math.max(s == null ? Integer.MIN_VALUE : s.revision(),
+                current == null ? Integer.MIN_VALUE : current.revision());
+        if (mesh.revision() <= currentRevision) return;
+        sections.putLayeredMesh(mesh);
+        if (s == null) {
+            s = new RenderWorld.Section(mesh.chunkX(), mesh.chunkZ(), mesh.y(), mesh.revision(),
+                    mesh.revision(), 0, 15, mesh.fullyOpaque());
+        } else {
+            s = new RenderWorld.Section(s.chunkX(), s.chunkZ(), s.y(), mesh.revision(),
+                    mesh.revision(), s.blockLight(), s.skyLight(), mesh.fullyOpaque());
+        }
+        sections.put(s);
+        long key = SectionStorage.packKey(s.chunkX(), s.chunkZ(), s.y());
+        boolean isNew = (sectionStore.put(key, s) == null);
+        if (isNew) {
+            keyToIndex.put(key, persistentSectionList.size());
+            persistentSectionList.add(s);
+            sectionsDirty = true;
+            keysDirty = true;
+        } else {
+            Integer idx = keyToIndex.get(key);
+            if (idx != null && idx < persistentSectionList.size()) {
+                persistentSectionList.set(idx, s);
+            } else {
+                keyToIndex.put(key, persistentSectionList.size());
+                persistentSectionList.add(s);
+                sectionsDirty = true;
+            }
+        }
     }
 
     private static RenderWorld.Camera defaultCamera() {

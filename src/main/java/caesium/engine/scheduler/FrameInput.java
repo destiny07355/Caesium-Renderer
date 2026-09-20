@@ -26,7 +26,7 @@ public final class FrameInput {
         this.deltaMillis = deltaMillis;
         this.timeMs = timeMs;
         this.competitive = competitive;
-        this.explosions = List.copyOf(explosions);
+        this.explosions = explosions == null || explosions.isEmpty() ? List.of() : List.copyOf(explosions);
     }
 
     public RenderWorld world() {

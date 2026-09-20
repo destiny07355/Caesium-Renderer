@@ -30,6 +30,20 @@ public enum HardwarePreset {
             cfg.meshingThreads           = 1;
             cfg.persistentBufferSizeMB   = 16;
             cfg.forceZeroCopyPath        = true;
+            cfg.entityRenderDistanceMult = 0.50f;
+            cfg.entityLODDistance        = 16;
+            cfg.blockEntityRenderDistance = 24;
+            cfg.maxBlockEntitiesPerFrame = 32;
+            cfg.maxParticleCount         = 500;
+            cfg.particleCullDistance     = 32;
+            cfg.enableEntityOutlines     = false;
+            cfg.enableClouds             = false;
+            cfg.enableWeather            = false;
+            cfg.ambientOcclusionLevel    = 0;
+            cfg.biomeBlendRadius         = 0;
+            cfg.maxChunkUpdatesPerFrame  = 48;
+            cfg.chunkWorkerPriority      = 0;
+            cfg.cpuRenderAhead           = 0;
         }
     },
 
@@ -51,6 +65,18 @@ public enum HardwarePreset {
             cfg.meshingThreads           = 2;
             cfg.persistentBufferSizeMB   = 32;
             cfg.forceZeroCopyPath        = true;
+            cfg.entityRenderDistanceMult = 0.65f;
+            cfg.entityLODDistance        = 20;
+            cfg.maxBlockEntitiesPerFrame = 48;
+            cfg.maxParticleCount         = 1500;
+            cfg.particleCullDistance     = 40;
+            cfg.enableEntityOutlines     = false;
+            cfg.enableWeather            = false;
+            cfg.ambientOcclusionLevel    = 1;
+            cfg.biomeBlendRadius         = 1;
+            cfg.maxChunkUpdatesPerFrame  = 16;
+            cfg.chunkWorkerPriority      = 0;
+            cfg.cpuRenderAhead           = 1;
         }
     },
 
@@ -69,9 +95,12 @@ public enum HardwarePreset {
             cfg.enableSIMDCulling        = true;
             cfg.enableEntityBatching     = true;
             cfg.enableParticleBatching   = true;
-            cfg.meshingThreads           = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+            cfg.meshingThreads           = 2;
             cfg.persistentBufferSizeMB   = 128;
             cfg.forceZeroCopyPath        = false;
+            cfg.maxParticleCount         = 4000;
+            cfg.maxChunkUpdatesPerFrame  = 32;
+            cfg.cpuRenderAhead           = 2;
         }
     },
 
@@ -90,9 +119,13 @@ public enum HardwarePreset {
             cfg.enableSIMDCulling        = true;
             cfg.enableEntityBatching     = true;
             cfg.enableParticleBatching   = true;
-            cfg.meshingThreads           = Math.max(4, Runtime.getRuntime().availableProcessors() - 2);
+            cfg.meshingThreads           = 3;
             cfg.persistentBufferSizeMB   = 256;
             cfg.forceZeroCopyPath        = false;
+            cfg.entityRenderDistanceMult = 0.75f;
+            cfg.maxParticleCount         = 6000;
+            cfg.maxChunkUpdatesPerFrame  = 48;
+            cfg.cpuRenderAhead           = 0;
         }
     },
 
@@ -112,7 +145,7 @@ public enum HardwarePreset {
             cfg.enableSIMDCulling        = true;
             cfg.enableEntityBatching     = true;
             cfg.enableParticleBatching   = true;
-            cfg.meshingThreads           = Runtime.getRuntime().availableProcessors();
+            cfg.meshingThreads           = 4;
             cfg.persistentBufferSizeMB   = 512;
             cfg.forceZeroCopyPath        = false;
         }

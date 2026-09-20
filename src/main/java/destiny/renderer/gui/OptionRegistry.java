@@ -117,6 +117,10 @@ public final class OptionRegistry {
     }
 
     public static List<OptionPage> buildPages() {
+        return buildPages(cfg().advancedMenu);
+    }
+
+    public static List<OptionPage> buildPages(boolean advanced) {
         // Collect entrypoints from Fabric loader
         try {
             net.fabricmc.loader.api.FabricLoader.getInstance()
@@ -142,18 +146,26 @@ public final class OptionRegistry {
         } catch (Throwable ignored) {}
 
         List<OptionPage> pages = new ArrayList<>();
-        pages.add(generalPage());
-        pages.add(performancePage());
-        pages.add(qualityPage());
-        pages.add(particlesPage());
-        pages.add(detailsPage());
-        pages.add(animationsPage());
-        pages.add(overlaysPage());
-        pages.add(hardwarePage());
-        pages.add(telemetryPage());
-        pages.add(appearancePage());
-        pages.add(jvmPage());
-        pages.add(workAllotmentPage());
+        if (!advanced) {
+            // Simple menu: presets first, plus a streamlined selection of friendly pages
+            pages.add(presetsPage());
+            pages.add(generalPage());
+            pages.add(appearancePage());
+        } else {
+            // Advanced menu: all deep engine configuration pages, excluding presets
+            pages.add(generalPage());
+            pages.add(performancePage());
+            pages.add(qualityPage());
+            pages.add(particlesPage());
+            pages.add(detailsPage());
+            pages.add(animationsPage());
+            pages.add(overlaysPage());
+            pages.add(hardwarePage());
+            pages.add(telemetryPage());
+            pages.add(appearancePage());
+            pages.add(jvmPage());
+            pages.add(workAllotmentPage());
+        }
 
         // Merge injected custom groups into standard pages
         List<OptionPage> result = new ArrayList<>();
@@ -375,13 +387,14 @@ public final class OptionRegistry {
                 false)
                 .requiresReload()
                 .keywords("shader", "shaders", "pack", "glsl", "spirv"))
-            .add(enumOpt("vulkan_device", "Vulkan GPU",
-                "Target physical GPU when Vulkan is active. Auto scores by capability.",
+            .add(new Option<String>("vulkan_device", Text.literal("Vulkan GPU"),
+                Text.literal("Target physical GPU when Vulkan is active. Displays detected system GPUs."),
                 Impact.EXTREME,
-                () -> vulkanDeviceValue(),
-                v -> { c.vulkanDevice = v.name(); },
-                VulkanDevice.AUTO,
-                List.of(VulkanDevice.AUTO, VulkanDevice.DISCRETE, VulkanDevice.INTEGRATED))
+                () -> c.vulkanDevice != null ? c.vulkanDevice : "AUTO",
+                v -> { c.vulkanDevice = v; },
+                "AUTO")
+                .values(getAvailableGpuDevices())
+                .format(v -> v)
                 .requiresReload()
                 .keywords("gpu", "device", "graphics card", "discrete", "integrated", "vulkan"))
             .add(bool("window_present", "Present to Game Window",
@@ -425,17 +438,20 @@ public final class OptionRegistry {
         }
     }
 
-    /** Vulkan physical-device choices exposed to the settings screen. */
-    private enum VulkanDevice {
-        AUTO, DISCRETE, INTEGRATED;
-    }
-
-    private static VulkanDevice vulkanDeviceValue() {
+    public static List<String> getAvailableGpuDevices() {
+        List<String> list = new ArrayList<>();
+        list.add("AUTO");
+        list.add("DISCRETE");
+        list.add("INTEGRATED");
         try {
-            return VulkanDevice.valueOf(RendererConfig.get().vulkanDevice);
-        } catch (IllegalArgumentException e) {
-            return VulkanDevice.AUTO;
-        }
+            List<String> discovered = destiny.renderer.hardware.VulkanDeviceDiscovery.deviceNames();
+            for (String dev : discovered) {
+                if (dev != null && !dev.isBlank() && !list.contains(dev)) {
+                    list.add(dev);
+                }
+            }
+        } catch (Throwable ignored) {}
+        return List.copyOf(list);
     }
 
     // ---------------------------------------------------------------- Quality
@@ -823,7 +839,10 @@ public final class OptionRegistry {
                     + ". See the Work Allotment page."))
             .add(bool("cull_block_entities", "Block Entity Culling",
                 "Skip drawing chests and signs outside your view.", Impact.HIGH,
-                () -> c.cullBlockEntities, v -> c.cullBlockEntities = v, true))
+                () -> c.cullBlockEntities, v -> c.cullBlockEntities = v, true)
+                .enabledWhen(() -> WorkAllotment.isOwnedByUs(Capability.ENTITY_CULLING),
+                    "Handled by " + WorkAllotment.getOwner(Capability.ENTITY_CULLING).displayName()
+                    + ". See the Work Allotment page."))
             .add(bool("cull_item_frames", "Item Frame Culling",
                 "Skip distant or hidden item frames.", Impact.MEDIUM,
                 () -> c.cullItemFrames, v -> c.cullItemFrames = v, true))
@@ -839,8 +858,15 @@ public final class OptionRegistry {
                 () -> c.blockEntityRenderDistance / 16,
                 v -> c.blockEntityRenderDistance = v * 16, 2, 0, 16, 1)
                 .format(v -> v == 0 ? "Unlimited" : v + " chunks")
-                .enabledWhen(() -> c.enableBlockEntities, "Enable Block Entities first.")
-                .keywords("chest", "sign", "banner", "beacon", "shulker"))
+                .enabledWhen(() -> c.enableBlockEntities, "Enable Block Entities first."))
+            .add(bool("optimize_block_entities", "Static Block Entity Optimization",
+                "Bake resting chests, signs, beds and bells directly into chunk meshes (OBE style).", Impact.EXTREME,
+                () -> c.optimizeBlockEntities, v -> c.optimizeBlockEntities = v, true)
+                .enabledWhen(() -> WorkAllotment.isOwnedByUs(Capability.BLOCK_ENTITY_OPTIMIZATION),
+                    "Handled by " + WorkAllotment.getOwner(Capability.BLOCK_ENTITY_OPTIMIZATION).displayName()
+                    + ". See the Work Allotment page.")
+                .requiresReload()
+                .keywords("obe", "chest", "sign", "bed", "bell", "block entity", "static"))
             .add(bool("entity_outlines", "Entity Outlines",
                 "Glow outline on spectral-arrow and glowing entities.",
                 Impact.MEDIUM,
@@ -1008,7 +1034,7 @@ public final class OptionRegistry {
                 "Rebuild budget per frame when deferral is on.",
                 Impact.HIGH,
                 () -> c.maxChunkUpdatesPerFrame, v -> c.maxChunkUpdatesPerFrame = v,
-                8, 1, 32, 1)
+                32, 1, 64, 1)
                 .enabledWhen(() -> c.deferChunkUpdates, "Enable Deferred Chunk Updates first."))
             .add(intOpt("chunk_immediate_radius", "Immediate Rebuild Radius",
                 "Block edits inside this radius always rebuild immediately. "

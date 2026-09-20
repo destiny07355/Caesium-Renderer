@@ -76,11 +76,6 @@ public abstract class GameRendererMixin {
         // Record the completion fence for the frames-in-flight limiter.
         destiny.renderer.render.CpuRenderAheadLimiter.endFrame();
 
-        // Opt-in adaptive render distance (R3). No-op until the user enables it; only
-        // fires every few seconds, so per-frame cost is a single clock read + a config
-        // field test.
-        destiny.renderer.chunk.AdaptiveViewDistance.tick();
-
         // Drive the Caesium engine frame from the game's render loop. Offscreen by default;
         // when the windowPresent option is on the engine presents into the real window.
         DestinyRenderer.onFrame();

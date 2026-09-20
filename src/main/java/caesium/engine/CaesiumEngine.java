@@ -50,8 +50,15 @@ public final class CaesiumEngine {
     }
 
     public void stop() {
-        device.stop();
-        pool.close();
+        try {
+            graph.close();
+        } finally {
+            try {
+                device.stop();
+            } finally {
+                pool.close();
+            }
+        }
     }
 
     public GpuBackend backend() {
@@ -68,6 +75,14 @@ public final class CaesiumEngine {
 
     public SceneManager scene() {
         return scene;
+    }
+
+    public WorkStealingPool pool() {
+        return pool;
+    }
+
+    public BudgetPolicy policy() {
+        return policy;
     }
 
     public FrameScheduler scheduler() {

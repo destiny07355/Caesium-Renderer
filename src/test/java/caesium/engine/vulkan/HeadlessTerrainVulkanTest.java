@@ -3,7 +3,7 @@ package caesium.engine.vulkan;
 import caesium.engine.CaesiumEngine;
 import caesium.engine.backend.GpuBackend;
 import caesium.engine.backend.vulkan.VulkanBackend;
-import caesium.engine.debug.TerrainPass;
+import caesium.engine.render.TerrainPass;
 import caesium.engine.scheduler.FrameInput;
 import caesium.engine.world.CubeMeshBuilder;
 import caesium.engine.world.DeltaCommand;

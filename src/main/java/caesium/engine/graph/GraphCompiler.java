@@ -154,17 +154,23 @@ public final class GraphCompiler {
     public static final class CompiledGraph {
 
         private final List<RenderPass> order;
+        private final RenderPass[] orderArray;
         private final List<List<RenderPass>> stages;
         private final List<Barrier> barriers;
 
         CompiledGraph(List<RenderPass> order, List<List<RenderPass>> stages, List<Barrier> barriers) {
             this.order = List.copyOf(order);
+            this.orderArray = order.toArray(new RenderPass[0]);
             this.stages = List.copyOf(stages);
             this.barriers = List.copyOf(barriers);
         }
 
         public List<RenderPass> order() {
             return order;
+        }
+
+        public RenderPass[] orderArray() {
+            return orderArray;
         }
 
         public List<List<RenderPass>> stages() {

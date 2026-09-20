@@ -22,14 +22,18 @@ public final class ExplosionResponder {
     private final float[] radii   = new float[CAPACITY];
     private int           head    = 0;
 
-    public void onEvent(DeltaCommand.Explosion explosion) {
+    public void onExplosion(float x, float y, float z, float radius, long timeMs) {
         int slot = head % CAPACITY;
-        timesMs[slot] = explosion.timeMs();
-        xs[slot]      = explosion.x();
-        ys[slot]      = explosion.y();
-        zs[slot]      = explosion.z();
-        radii[slot]   = explosion.radius();
+        timesMs[slot] = timeMs;
+        xs[slot]      = x;
+        ys[slot]      = y;
+        zs[slot]      = z;
+        radii[slot]   = radius;
         head++;
+    }
+
+    public void onEvent(DeltaCommand.Explosion explosion) {
+        onExplosion(explosion.x(), explosion.y(), explosion.z(), explosion.radius(), explosion.timeMs());
     }
 
     /** Whether any tracked explosion is still within its hot window. */

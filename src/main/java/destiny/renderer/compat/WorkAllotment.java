@@ -48,23 +48,26 @@ public final class WorkAllotment {
         PRIORITY.put(Capability.TERRAIN_RENDERING, List.of(
             Provider.VULKANMOD, Provider.SODIUM, Provider.EMBEDDIUM, Provider.DESTINY));
 
-        // Caesium is the primary mod of this pack. It should own batching work itself rather
-        // than handing it to a sub-mod, so we place DESTINY first; installation of a dedicated
-        // batching mod does not stand us down by default.
+        // When a dedicated batching mod like ImmediatelyFast is present, yield batching
+        // to it by default to avoid duplicate state tracking, unless the user explicitly overrides it.
         PRIORITY.put(Capability.ENTITY_BATCHING, List.of(
-            Provider.DESTINY, Provider.IMMEDIATELYFAST));
+            Provider.IMMEDIATELYFAST, Provider.DESTINY));
         PRIORITY.put(Capability.PARTICLE_BATCHING, List.of(
-            Provider.DESTINY, Provider.IMMEDIATELYFAST));
+            Provider.IMMEDIATELYFAST, Provider.DESTINY));
         PRIORITY.put(Capability.HUD_BATCHING, List.of(
-            Provider.DESTINY, Provider.IMMEDIATELYFAST, Provider.NONE));
+            Provider.IMMEDIATELYFAST, Provider.DESTINY, Provider.NONE));
 
-        // Frustum/occlusion culling of entities. Our own pass is primary.
+        // Frustum/occlusion culling of entities: if EntityCulling is installed, let it handle entity culling by default.
         PRIORITY.put(Capability.ENTITY_CULLING, List.of(
-            Provider.DESTINY, Provider.ENTITYCULLING));
+            Provider.ENTITYCULLING, Provider.DESTINY));
 
-        // Block/fluid face culling. We own this unless overridden.
+        // Block/fluid face culling: if MoreCulling or BadOptimizations is installed, yield to them by default.
         PRIORITY.put(Capability.BLOCK_CULLING, List.of(
-            Provider.DESTINY, Provider.MORECULLING, Provider.BADOPTIMIZATIONS));
+            Provider.MORECULLING, Provider.BADOPTIMIZATIONS, Provider.DESTINY));
+
+        // Static block entity optimization: if Dedicated Optimized Block Entities (OBE) is installed, yield to it.
+        PRIORITY.put(Capability.BLOCK_ENTITY_OPTIMIZATION, List.of(
+            Provider.OBE, Provider.DESTINY));
 
         // Iris owns shaders completely when installed.
         PRIORITY.put(Capability.SHADER_PIPELINE, List.of(
@@ -72,7 +75,7 @@ public final class WorkAllotment {
 
         // Biome block colour resolution and blending.
         PRIORITY.put(Capability.BLOCK_COLORS, List.of(
-            Provider.DESTINY, Provider.SODIUM, Provider.EMBEDDIUM));
+            Provider.SODIUM, Provider.EMBEDDIUM, Provider.DESTINY));
 
         // Pure memory/CPU domains we do not implement.
         PRIORITY.put(Capability.PALETTE_MEMORY, List.of(Provider.FERRITECORE, Provider.NONE));
@@ -166,9 +169,15 @@ public final class WorkAllotment {
                 cap.displayName(), owner.displayName(), REASONS.get(cap)));
         }
         if (!ownsTerrain()) {
-            LOGGER.warning("[Caesium] Terrain rendering is owned by "
-                + getOwner(Capability.TERRAIN_RENDERING).displayName()
-                + " — DestinyRenderer's terrain pipeline is DISABLED to avoid conflicts.");
+            Provider owner = getOwner(Capability.TERRAIN_RENDERING);
+            if (!TERRAIN_PIPELINE_PORTED && owner == Provider.DESTINY) {
+                LOGGER.info("[Caesium] Custom terrain pipeline is unavailable on 1.21.11; "
+                    + "vanilla remains responsible for terrain rendering.");
+            } else {
+                LOGGER.warning("[Caesium] Terrain rendering is owned by "
+                    + owner.displayName()
+                    + " — Caesium's terrain pipeline is disabled to avoid conflicts.");
+            }
         }
         LOGGER.info("===============================================");
     }
@@ -218,11 +227,6 @@ public final class WorkAllotment {
     }
 
     private static boolean computeOwnsTerrain() {
-        // Hard-gated to false on 1.21.11: Mojang's blaze3d GpuDevice/RenderPass rewrite
-        // removed the ability to interleave raw GL terrain draws with vanilla rendering,
-        // and RenderPass exposes no multi-draw-indirect entry point. Re-enabling this
-        // requires porting the geometry pipeline onto blaze3d RenderPipeline objects.
-        // See docs/ARCHITECTURE.md.
         if (!TERRAIN_PIPELINE_PORTED) return false;
 
         return isOwnedByUs(Capability.TERRAIN_RENDERING)
@@ -230,19 +234,11 @@ public final class WorkAllotment {
     }
 
     /**
-     * Flipped to true only once the terrain geometry pipeline has been ported to the
-     * blaze3d RenderPass API. Guarded as a constant so every dependent code path stays
-     * compiled, reviewed and ready rather than rotting behind a deleted branch.
+     * The staged live framebuffer bridge is available. Runtime ownership remains
+     * separately gated by the experimental option, provider allotment, per-layer
+     * coverage checks, and the successful-frame ownership gate.
      */
-    public static final boolean TERRAIN_PIPELINE_PORTED = computeTerrainPipelinePorted();
-
-    private static boolean computeTerrainPipelinePorted() {
-        try {
-            return RendererConfig.get().experimentalTerrainPipeline;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
+    public static final boolean TERRAIN_PIPELINE_PORTED = true;
 
     /**
      * @return true if a conflicting full-renderer replacement mod is installed.

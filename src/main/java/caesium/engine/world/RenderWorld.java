@@ -30,6 +30,67 @@ public final class RenderWorld {
                               float[] positions, float[] colors, int[] indices) {
     }
 
+    /** Minecraft terrain layers in their required draw order. */
+    public enum TerrainLayer {
+        SOLID, CUTOUT, TRANSLUCENT, TRIPWIRE
+    }
+
+    /**
+     * Immutable-by-contract baked geometry for one render layer. Attribute arrays are
+     * parallel by vertex; indices address those vertices. No Minecraft types cross this seam.
+     */
+    public record LayerMesh(TerrainLayer layer, float[] positions, float[] uvs,
+                            int[] colors, int[] lights, byte[] normals, int[] indices,
+                            java.nio.ByteBuffer packedVertices, java.nio.ByteBuffer packedIndices) {
+        public LayerMesh {
+            if (layer == null || positions == null || uvs == null || colors == null
+                    || lights == null || normals == null || indices == null) {
+                throw new IllegalArgumentException("layer mesh attributes must not be null");
+            }
+            if (positions.length % 3 != 0) {
+                throw new IllegalArgumentException("positions must contain xyz triples");
+            }
+            int vertices = positions.length / 3;
+            if (uvs.length != vertices * 2 || colors.length != vertices
+                    || lights.length != vertices || normals.length != vertices) {
+                throw new IllegalArgumentException("layer mesh vertex attributes have different lengths");
+            }
+            for (int index : indices) {
+                if (index < 0 || index >= vertices) {
+                    throw new IllegalArgumentException("index outside vertex array: " + index);
+                }
+            }
+        }
+
+        public LayerMesh(TerrainLayer layer, float[] positions, float[] uvs,
+                         int[] colors, int[] lights, byte[] normals, int[] indices) {
+            this(layer, positions, uvs, colors, lights, normals, indices, null, null);
+        }
+
+        public int vertexCount() { return positions.length / 3; }
+        public int indexCount() { return indices.length; }
+        public boolean hasPackedBuffers() { return packedVertices != null && packedIndices != null; }
+    }
+
+    /** Complete render-layer-separated output for one chunk section. */
+    public record LayeredSectionMesh(long chunkX, long chunkZ, int y, int revision,
+                                     List<LayerMesh> layers, boolean fullyOpaque,
+                                     boolean coverageComplete) {
+        public LayeredSectionMesh {
+            layers = List.copyOf(layers);
+        }
+
+        public LayeredSectionMesh(long chunkX, long chunkZ, int y, int revision,
+                                  List<LayerMesh> layers) {
+            this(chunkX, chunkZ, y, revision, layers, false, true);
+        }
+
+        public LayeredSectionMesh(long chunkX, long chunkZ, int y, int revision,
+                                  List<LayerMesh> layers, boolean fullyOpaque) {
+            this(chunkX, chunkZ, y, revision, layers, fullyOpaque, true);
+        }
+    }
+
     public record Entity(long id, float x, float y, float z, float pitch, float yaw,
                          float scale, int renderMask, int light) {
     }
@@ -52,15 +113,33 @@ public final class RenderWorld {
     private final List<Section> sections;
     private final List<Entity> entities;
     private final List<ParticleBatch> particles;
+    private final java.util.Set<Long> sectionKeys;
 
     RenderWorld(long revision, Camera camera, Options options,
                 List<Section> sections, List<Entity> entities, List<ParticleBatch> particles) {
+        this(revision, camera, options, sections, entities, particles, null);
+    }
+
+    RenderWorld(long revision, Camera camera, Options options,
+                List<Section> sections, List<Entity> entities, List<ParticleBatch> particles,
+                java.util.Set<Long> sectionKeys) {
         this.revision = revision;
         this.camera = camera;
         this.options = options;
         this.sections = sections;
         this.entities = entities;
         this.particles = particles;
+        this.sectionKeys = sectionKeys;
+    }
+
+    public boolean containsSection(long chunkX, long chunkZ, int y) {
+        if (sectionKeys != null) {
+            return sectionKeys.contains(SectionStorage.packKey(chunkX, chunkZ, y));
+        }
+        for (Section s : sections) {
+            if (s.chunkX() == chunkX && s.chunkZ() == chunkZ && s.y() == y) return true;
+        }
+        return false;
     }
 
     public long revision() {
@@ -83,8 +162,24 @@ public final class RenderWorld {
         return entities;
     }
 
+    public java.util.Set<Long> sectionKeys() {
+        return sectionKeys;
+    }
+
     public List<ParticleBatch> particles() {
         return particles;
+    }
+
+    /**
+     * Fast-path: updates camera and/or options while preserving existing section/entity lists.
+     * Eliminates rebuilding 2,000+ chunk section maps on frames where only the camera moved.
+     */
+    public RenderWorld withCameraAndOptions(long revision, Camera camera, Options options) {
+        return new RenderWorld(revision, camera, options, this.sections, this.entities, this.particles, this.sectionKeys);
+    }
+
+    public RenderWorld withCamera(long revision, Camera camera) {
+        return new RenderWorld(revision, camera, this.options, this.sections, this.entities, this.particles, this.sectionKeys);
     }
 
     public Builder toBuilder() {
@@ -100,8 +195,8 @@ public final class RenderWorld {
         private final ArrayList<Entity> entities = new ArrayList<>();
         private final ArrayList<ParticleBatch> particles = new ArrayList<>();
 
-        private long packKey(long chunkX, long chunkZ) {
-            return (chunkX & 0x3FFFFFL) | ((chunkZ & 0x3FFFFFL) << 22);
+        private long packKey(long chunkX, long chunkZ, int y) {
+            return SectionStorage.packKey(chunkX, chunkZ, y);
         }
         private boolean dirty = false;
         private RenderWorld lastBuilt = null;
@@ -116,7 +211,7 @@ public final class RenderWorld {
             this.camera = world.camera;
             this.options = world.options;
             for (Section s : world.sections) {
-                this.sections.put(packKey(s.chunkX(), s.chunkZ()), s);
+                this.sections.put(packKey(s.chunkX(), s.chunkZ(), s.y()), s);
             }
             this.entities.addAll(world.entities);
             this.particles.addAll(world.particles);
@@ -146,7 +241,7 @@ public final class RenderWorld {
         }
 
         public Builder addSection(Section s) {
-            sections.put(packKey(s.chunkX(), s.chunkZ()), s);
+            sections.put(packKey(s.chunkX(), s.chunkZ(), s.y()), s);
             dirty = true;
             return this;
         }
@@ -176,7 +271,8 @@ public final class RenderWorld {
         public RenderWorld build() {
             if (!dirty && lastBuilt != null) return lastBuilt;
             lastBuilt = new RenderWorld(revision, camera, options,
-                    List.copyOf(sections.values()), List.copyOf(entities), List.copyOf(particles));
+                    List.copyOf(sections.values()), List.copyOf(entities), List.copyOf(particles),
+                    java.util.Set.copyOf(sections.keySet()));
             dirty = false;
             return lastBuilt;
         }

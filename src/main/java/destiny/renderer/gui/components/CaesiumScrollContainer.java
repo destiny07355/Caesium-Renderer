@@ -11,6 +11,8 @@ import net.minecraft.client.gui.DrawContext;
  */
 public final class CaesiumScrollContainer {
 
+    private static final int SCROLLBAR_INSET = 3;
+
     private int x, y, width, height;
     private int contentHeight = 0;
     private float scrollOffset = 0;
@@ -56,11 +58,13 @@ public final class CaesiumScrollContainer {
         return mx >= x && mx <= x + width && my >= y && my <= y + height;
     }
 
-    private int thumbX() { return x + width - 5; }
+    private int scrollbarHeight() { return Math.max(0, height - SCROLLBAR_INSET * 2); }
+
+    private int thumbX() { return x + width - CaesiumTheme.SCROLLBAR_WIDTH - SCROLLBAR_INSET; }
 
     private boolean overThumb(double mx, double my) {
         return maxScroll() > 0 && mx >= thumbX() - 1 && mx <= thumbX() + 6
-            && my >= y && my <= y + height;
+            && my >= y + SCROLLBAR_INSET && my <= y + height - SCROLLBAR_INSET;
     }
 
     public boolean mouseClicked(double mx, double my, int btn) {
@@ -76,7 +80,9 @@ public final class CaesiumScrollContainer {
     public void mouseReleased() { draggingThumb = false; }
 
     private void dragTo(double my) {
-        double frac = (my - y) / (double) height;
+        int trackHeight = scrollbarHeight();
+        if (trackHeight == 0) return;
+        double frac = (my - y - SCROLLBAR_INSET) / trackHeight;
         scrollTarget = (float)(frac * maxScroll());
         clampScroll();
     }
@@ -91,6 +97,7 @@ public final class CaesiumScrollContainer {
 
     public void renderScrollbar(DrawContext ctx, int mx, int my) {
         boolean hot = draggingThumb || overThumb(mx, my);
-        GuiRenderer.scrollbar(ctx, thumbX(), y, height, scrollOffset, contentHeight, hot);
+        GuiRenderer.scrollbar(ctx, thumbX(), y + SCROLLBAR_INSET, scrollbarHeight(),
+            scrollOffset, contentHeight, hot);
     }
 }

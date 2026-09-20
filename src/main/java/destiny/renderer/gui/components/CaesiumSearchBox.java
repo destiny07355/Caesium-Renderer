@@ -25,7 +25,8 @@ public final class CaesiumSearchBox {
                             String initialQuery, Consumer<String> onQueryChanged) {
         this.x = x; this.y = y; this.width = width; this.height = height;
 
-        this.field = new TextFieldWidget(textRenderer, x + 6, y + 2, width - 12, height - 4,
+        int padY = Math.max(0, (height - 9) / 2);
+        this.field = new TextFieldWidget(textRenderer, x + 8, y + padY, width - 16, height - 4,
             Text.literal("Search"));
         this.field.setPlaceholder(CaesiumFont.text("Search settings..."));
         this.field.setTextShadow(false);
@@ -37,9 +38,10 @@ public final class CaesiumSearchBox {
 
     public void setBounds(int x, int y, int width, int height) {
         this.x = x; this.y = y; this.width = width; this.height = height;
-        this.field.setX(x + 6);
-        this.field.setY(y + 2);
-        this.field.setWidth(width - 12);
+        int padY = Math.max(0, (height - 9) / 2);
+        this.field.setX(x + 8);
+        this.field.setY(y + padY);
+        this.field.setWidth(width - 16);
     }
 
     public TextFieldWidget getTextField() { return field; }
@@ -52,10 +54,10 @@ public final class CaesiumSearchBox {
 
     public boolean mouseClicked(net.minecraft.client.gui.Click click, boolean doubled) {
         if (isOver(click.x(), click.y())) {
+            field.setFocused(true);
             field.onClick(click, doubled);
             return true;
         }
-        // Clicking outside clears focus
         field.setFocused(false);
         return false;
     }

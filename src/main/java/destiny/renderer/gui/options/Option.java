@@ -91,6 +91,9 @@ public final class Option<T> {
 
     /** True when changing this requires a world/renderer reload to take effect. */
     private boolean requiresReload = false;
+    private boolean requiresResourceReload = false;
+    private boolean requiresWorldReload = false;
+    private boolean requiresRestart = false;
 
     public Option(String id, Text name, Text tooltip, Impact impact,
                   Supplier<T> getter, Consumer<T> setter, T defaultValue) {
@@ -149,6 +152,22 @@ public final class Option<T> {
 
     public Option<T> requiresReload() {
         this.requiresReload = true;
+        this.requiresWorldReload = true;
+        return this;
+    }
+
+    public Option<T> requiresResourceReload() {
+        this.requiresResourceReload = true;
+        return this;
+    }
+
+    public Option<T> requiresWorldReload() {
+        this.requiresWorldReload = true;
+        return this;
+    }
+
+    public Option<T> requiresRestart() {
+        this.requiresRestart = true;
         return this;
     }
 
@@ -167,6 +186,9 @@ public final class Option<T> {
     public double  getStep()    { return step; }
     public List<T> getAllowedValues() { return allowedValues; }
     public boolean isRequiresReload() { return requiresReload; }
+    public boolean isRequiresResourceReload() { return requiresResourceReload; }
+    public boolean isRequiresWorldReload() { return requiresWorldReload || requiresReload; }
+    public boolean isRequiresRestart() { return requiresRestart; }
     public String  getDisabledReason() { return disabledReason; }
     public String  getDetailedExplanation() { return detailedExplanation != null && !detailedExplanation.isEmpty() ? detailedExplanation : tooltip != null ? tooltip.getString() : ""; }
     public String  getDefaultReason() { return defaultReason != null && !defaultReason.isEmpty() ? defaultReason : disabledReason; }

@@ -1,220 +1,219 @@
 package destiny.renderer.chunk;
 
-import java.util.ArrayList;
-import java.util.BitSet;
-import java.util.List;
+import java.util.Arrays;
 
-/**
- * Topological graph-based translucency sorter implementing the algorithm described in
- * <em>"Sorting Rendered Transparent Objects" by Douira (2022)</em>.
- *
- * <h2>Problem</h2>
- * Translucent quads (glass, water, ice) must be rendered in back-to-front order
- * relative to the camera to produce correct alpha blending. Within a chunk section,
- * the correct order changes as the camera moves.
- *
- * <h2>Algorithm Overview</h2>
- * <ol>
- *   <li>Build a directed <em>visibility graph</em> of translucent quads where an edge
- *       A → B means "A must be drawn before B" (i.e., B is closer to the camera).</li>
- *   <li>Perform a topological sort (DFS) on the graph to produce the draw order.</li>
- *   <li>If cycles exist (unavoidable in some camera angles), break them greedily
- *       at the edge that minimises visible artifacts.</li>
- *   <li>Store the resulting sorted index list, which is uploaded to the GPU as the
- *       index buffer for the translucent draw call.</li>
- * </ol>
- *
- * <h2>Complexity</h2>
- * O(Q²) for Q quads per section in the worst case, but typical chunk sections have
- * &lt;500 translucent quads and the graph is sparse, making it fast in practice.
- *
- * <h2>Camera Polytope</h2>
- * The sort direction is determined by the camera position relative to each quad's
- * centre. A quad A must render before B if A's centre is farther from the camera
- * than B's centre in the direction perpendicular to B's face.
- */
+/** Allocation-controlled back-to-front sorter for translucent section quads. */
 public final class TranslucencySorter {
-
-    /** Maximum quads per chunk section (conservative upper bound). */
     private static final int MAX_QUADS = 4096;
-
-    // -------------------------------------------------------------------------
-    // Quad data (populated during meshing)
-    // -------------------------------------------------------------------------
-
-    /** Quad centre X positions (world-space). */
-    private final float[] centreX = new float[MAX_QUADS];
-    /** Quad centre Y positions (world-space). */
-    private final float[] centreY = new float[MAX_QUADS];
-    /** Quad centre Z positions (world-space). */
-    private final float[] centreZ = new float[MAX_QUADS];
-    /** Face normal index for each quad (from PackedVertexFormat). */
-    private final int[]   normals  = new int[MAX_QUADS];
-    /** First vertex index in the packed vertex buffer for each quad. */
-    private final int[]   startVertices = new int[MAX_QUADS];
-
-    private int quadCount = 0;
-
-    // -------------------------------------------------------------------------
-    // Face normal vectors (unit, indexed by PackedVertexFormat.NORMAL_*)
-    // -------------------------------------------------------------------------
-    private static final float[][] NORMAL_VECS = {
-        { 1,  0,  0},  // POS_X
-        {-1,  0,  0},  // NEG_X
-        { 0,  1,  0},  // POS_Y
-        { 0, -1,  0},  // NEG_Y
-        { 0,  0,  1},  // POS_Z
-        { 0,  0, -1}   // NEG_Z
+    private static final int MAX_DEPENDENCY_EDGES = 262_144;
+    private static final float[][] NORMALS = {
+            {1, 0, 0}, {-1, 0, 0}, {0, 1, 0},
+            {0, -1, 0}, {0, 0, 1}, {0, 0, -1}
     };
 
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
+    private final float[] centreX = new float[MAX_QUADS];
+    private final float[] centreY = new float[MAX_QUADS];
+    private final float[] centreZ = new float[MAX_QUADS];
+    private final int[] normals = new int[MAX_QUADS];
+    private final int[] startVertices = new int[MAX_QUADS];
+    private final float[] distances = new float[MAX_QUADS];
+    private final int[] order = new int[MAX_QUADS];
+    private final int[] dependencyCounts = new int[MAX_QUADS];
+    private final int[] dependencyOffsets = new int[MAX_QUADS + 1];
+    private final int[] dependencyWrites = new int[MAX_QUADS];
+    private int[] dependencyEdges = new int[4096];
+    private final byte[] visitState = new byte[MAX_QUADS];
+    private final int[] dfsNodes = new int[MAX_QUADS];
+    private final int[] dfsEdges = new int[MAX_QUADS];
+    private final int[] topoOrder = new int[MAX_QUADS];
+    private final int[] cachedVertexOrder = new int[MAX_QUADS];
 
-    /** Clears all quad data for a new meshing pass. */
+    private int quadCount;
+    private int dataVersion;
+    private int cachedDataVersion = -1;
+    private int cachedCount;
+    private int sortGeneration;
+    private int cachedCamXBits;
+    private int cachedCamYBits;
+    private int cachedCamZBits;
+
     public void reset() {
         quadCount = 0;
+        dataVersion++;
     }
 
-    /**
-     * Registers a translucent quad with the sorter.
-     *
-     * @param cx          quad centre X (world-space)
-     * @param cy          quad centre Y
-     * @param cz          quad centre Z
-     * @param normalIndex face normal index
-     * @param startVertex first vertex index of this quad in the packed vertex buffer
-     */
-    public void addQuad(float cx, float cy, float cz, int normalIndex, int startVertex) {
-        if (quadCount >= MAX_QUADS) return; // silently drop excess
-        centreX[quadCount]        = cx;
-        centreY[quadCount]        = cy;
-        centreZ[quadCount]        = cz;
-        normals[quadCount]        = normalIndex;
-        startVertices[quadCount]  = startVertex;
+    public void addQuad(float x, float y, float z, int normal, int startVertex) {
+        if (quadCount >= MAX_QUADS) return;
+        centreX[quadCount] = x;
+        centreY[quadCount] = y;
+        centreZ[quadCount] = z;
+        normals[quadCount] = normal;
+        startVertices[quadCount] = startVertex;
         quadCount++;
+        dataVersion++;
     }
 
-    /**
-     * Sorts all registered quads for the given camera position and returns the
-     * draw order as an array of quad indices (into {@code startVertices}).
-     *
-     * <p>The returned array represents the back-to-front rendering sequence.
-     * Each entry is a base vertex index; the GPU renders 4 vertices per quad
-     * starting at that offset, using 6 indices per quad (two triangles: 0,1,2, 0,2,3).
-     *
-     * @param camX camera world-space X
-     * @param camY camera world-space Y
-     * @param camZ camera world-space Z
-     * @return sorted array of vertex start indices, length = quadCount
-     */
+    /** Compatibility wrapper. Prefer sortInto on hot paths. */
     public int[] sort(float camX, float camY, float camZ) {
-        if (quadCount == 0) return new int[0];
+        int[] result = new int[quadCount];
+        sortInto(camX, camY, camZ, result);
+        return result;
+    }
 
-        // --- Build distance array for quick sort ---
-        // Primary: sort by squared distance (back-to-front = descending distance)
-        float[] dist2 = new float[quadCount];
-        Integer[] order = new Integer[quadCount];
+    /** Writes the sorted vertex starts into caller-owned storage and returns the count. */
+    public int sortInto(float camX, float camY, float camZ, int[] destination) {
+        if (destination.length < quadCount) {
+            throw new IllegalArgumentException("destination is smaller than quad count");
+        }
+        if (quadCount == 0) return 0;
+
+        int xBits = Float.floatToIntBits(camX);
+        int yBits = Float.floatToIntBits(camY);
+        int zBits = Float.floatToIntBits(camZ);
+        if (cachedDataVersion == dataVersion && cachedCamXBits == xBits
+                && cachedCamYBits == yBits && cachedCamZBits == zBits) {
+            System.arraycopy(cachedVertexOrder, 0, destination, 0, cachedCount);
+            return cachedCount;
+        }
+
         for (int i = 0; i < quadCount; i++) {
             float dx = centreX[i] - camX;
             float dy = centreY[i] - camY;
             float dz = centreZ[i] - camZ;
-            dist2[i] = dx * dx + dy * dy + dz * dz;
+            distances[i] = dx * dx + dy * dy + dz * dz;
             order[i] = i;
         }
+        quickSortDescending(order, distances, 0, quadCount - 1);
 
-        // Sort indices by descending distance
-        java.util.Arrays.sort(order, (a, b) -> Float.compare(dist2[b], dist2[a]));
+        if (quadCount < 32) {
+            for (int i = 0; i < quadCount; i++) cachedVertexOrder[i] = startVertices[order[i]];
+        } else {
+            if (buildDependencies(camX, camY, camZ)) {
+                int count = topologicalSort();
+                for (int i = 0; i < count; i++) cachedVertexOrder[i] = startVertices[topoOrder[i]];
+            } else {
+                // Pathological overlap must not turn one section into an unbounded memory spike.
+                for (int i = 0; i < quadCount; i++) cachedVertexOrder[i] = startVertices[order[i]];
+            }
+        }
 
-        // --- Topological refinement (Douira's algorithm) ---
-        // Build a sparse dependency graph: edge[i] → list of quads that must draw before i
-        @SuppressWarnings("unchecked")
-        List<Integer>[] before = new List[quadCount];
-        for (int i = 0; i < quadCount; i++) before[i] = new ArrayList<>();
+        cachedCount = quadCount;
+        cachedDataVersion = dataVersion;
+        cachedCamXBits = xBits;
+        cachedCamYBits = yBits;
+        cachedCamZBits = zBits;
+        sortGeneration++;
+        System.arraycopy(cachedVertexOrder, 0, destination, 0, cachedCount);
+        return cachedCount;
+    }
 
+    private boolean buildDependencies(float camX, float camY, float camZ) {
+        Arrays.fill(dependencyCounts, 0, quadCount, 0);
+        int edgeCount = 0;
         for (int i = 0; i < quadCount; i++) {
             for (int j = i + 1; j < quadCount; j++) {
-                // Check if quad j's face plane separates i and the camera
-                if (mustDrawBefore(i, j, camX, camY, camZ)) {
-                    before[j].add(i); // i must draw before j
-                } else if (mustDrawBefore(j, i, camX, camY, camZ)) {
-                    before[i].add(j); // j must draw before i
+                int target = dependencyTarget(i, j, camX, camY, camZ);
+                if (target >= 0) {
+                    dependencyCounts[target]++;
+                    edgeCount++;
+                    if (edgeCount > MAX_DEPENDENCY_EDGES) return false;
                 }
             }
         }
-
-        // Topological DFS sort
-        int[] result = new int[quadCount];
-        BitSet visited = new BitSet(quadCount);
-        BitSet onStack = new BitSet(quadCount);
-        int[] outIdx = {0};
-
+        ensureEdgeCapacity(edgeCount);
+        dependencyOffsets[0] = 0;
         for (int i = 0; i < quadCount; i++) {
-            if (!visited.get(order[i])) {
-                dfs(order[i], before, visited, onStack, result, outIdx);
+            dependencyOffsets[i + 1] = dependencyOffsets[i] + dependencyCounts[i];
+            dependencyWrites[i] = dependencyOffsets[i];
+        }
+        for (int i = 0; i < quadCount; i++) {
+            for (int j = i + 1; j < quadCount; j++) {
+                int target = dependencyTarget(i, j, camX, camY, camZ);
+                if (target == j) dependencyEdges[dependencyWrites[j]++] = i;
+                else if (target == i) dependencyEdges[dependencyWrites[i]++] = j;
             }
         }
-
-        // Convert quad indices to vertex start indices
-        int[] vertexOrder = new int[quadCount];
-        for (int i = 0; i < quadCount; i++) {
-            vertexOrder[i] = startVertices[result[i]];
-        }
-        return vertexOrder;
+        return true;
     }
 
-    // -------------------------------------------------------------------------
-    // Internals
-    // -------------------------------------------------------------------------
+    private int dependencyTarget(int i, int j, float camX, float camY, float camZ) {
+        if (mustDrawBefore(i, j, camX, camY, camZ)) return j;
+        if (mustDrawBefore(j, i, camX, camY, camZ)) return i;
+        return -1;
+    }
 
-    /**
-     * Returns true if quad A must be drawn before quad B.
-     * This is the case when B's plane separates A's centre from the camera:
-     * sign(dot(B_normal, cam - B_centre)) ≠ sign(dot(B_normal, A_centre - B_centre)).
-     */
+    private int topologicalSort() {
+        Arrays.fill(visitState, 0, quadCount, (byte) 0);
+        int out = 0;
+        for (int rootIndex = 0; rootIndex < quadCount; rootIndex++) {
+            int root = order[rootIndex];
+            if (visitState[root] != 0) continue;
+            int stackSize = 1;
+            dfsNodes[0] = root;
+            dfsEdges[0] = dependencyOffsets[root];
+            visitState[root] = 1;
+            while (stackSize > 0) {
+                int frame = stackSize - 1;
+                int node = dfsNodes[frame];
+                int edge = dfsEdges[frame];
+                int end = dependencyOffsets[node + 1];
+                boolean pushed = false;
+                while (edge < end) {
+                    int dependency = dependencyEdges[edge++];
+                    dfsEdges[frame] = edge;
+                    if (visitState[dependency] == 0) {
+                        dfsNodes[stackSize] = dependency;
+                        dfsEdges[stackSize] = dependencyOffsets[dependency];
+                        visitState[dependency] = 1;
+                        stackSize++;
+                        pushed = true;
+                        break;
+                    }
+                }
+                if (!pushed) {
+                    stackSize--;
+                    visitState[node] = 2;
+                    topoOrder[out++] = node;
+                }
+            }
+        }
+        return out;
+    }
+
     private boolean mustDrawBefore(int a, int b, float camX, float camY, float camZ) {
-        float[] nb = NORMAL_VECS[normals[b]];
-        float toCam = nb[0] * (camX - centreX[b])
-                    + nb[1] * (camY - centreY[b])
-                    + nb[2] * (camZ - centreZ[b]);
-        float toA   = nb[0] * (centreX[a] - centreX[b])
-                    + nb[1] * (centreY[a] - centreY[b])
-                    + nb[2] * (centreZ[a] - centreZ[b]);
-        // A must draw before B if A and the camera are on opposite sides of B's plane
-        return (toCam > 0) != (toA > 0);
+        float[] n = NORMALS[Math.max(0, Math.min(NORMALS.length - 1, normals[b]))];
+        float toCamera = n[0] * (camX - centreX[b]) + n[1] * (camY - centreY[b])
+                + n[2] * (camZ - centreZ[b]);
+        float toA = n[0] * (centreX[a] - centreX[b]) + n[1] * (centreY[a] - centreY[b])
+                + n[2] * (centreZ[a] - centreZ[b]);
+        return (toCamera > 0) != (toA > 0);
     }
 
-    /** Iterative DFS topological sort to avoid stack overflow on large quad counts. */
-    private void dfs(int start, List<Integer>[] before, BitSet visited, BitSet onStack,
-                     int[] result, int[] outIdx) {
-        java.util.Deque<int[]> stack = new java.util.ArrayDeque<>();
-        stack.push(new int[]{start, 0}); // [node, childIndex]
+    private void ensureEdgeCapacity(int required) {
+        if (dependencyEdges.length >= required) return;
+        int capacity = dependencyEdges.length;
+        while (capacity < required) capacity = Math.max(capacity + 1, capacity << 1);
+        dependencyEdges = new int[capacity];
+    }
 
-        while (!stack.isEmpty()) {
-            int[] frame = stack.peek();
-            int node = frame[0];
-            visited.set(node);
-            onStack.set(node);
-
-            List<Integer> deps = before[node];
-            boolean pushed = false;
-            while (frame[1] < deps.size()) {
-                int dep = deps.get(frame[1]++);
-                if (!visited.get(dep)) {
-                    stack.push(new int[]{dep, 0});
-                    pushed = true;
-                    break;
-                }
-                // Cycle: skip (back-edge; artifact is less bad than a crash)
-            }
-            if (!pushed) {
-                stack.pop();
-                onStack.clear(node);
-                result[outIdx[0]++] = node;
+    private static void quickSortDescending(int[] values, float[] keys, int low, int high) {
+        if (low >= high) return;
+        float pivot = keys[values[(low + high) >>> 1]];
+        int i = low;
+        int j = high;
+        while (i <= j) {
+            while (keys[values[i]] > pivot) i++;
+            while (keys[values[j]] < pivot) j--;
+            if (i <= j) {
+                int value = values[i];
+                values[i++] = values[j];
+                values[j--] = value;
             }
         }
+        if (low < j) quickSortDescending(values, keys, low, j);
+        if (i < high) quickSortDescending(values, keys, i, high);
     }
 
-    /** @return the number of quads registered since the last {@link #reset()}. */
     public int getQuadCount() { return quadCount; }
+    public int getSortGeneration() { return sortGeneration; }
 }

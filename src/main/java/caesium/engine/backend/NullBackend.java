@@ -199,6 +199,11 @@ public final class NullBackend implements GpuBackend {
         }
 
         @Override
+        public void drawIndexedIndirect(GpuBuffer commands, int offset, int drawCount, int stride) {
+            events.add("drawIndexedIndirect:" + drawCount + "@" + offset + ":" + stride);
+        }
+
+        @Override
         public void copyBuffer(GpuBuffer src, int srcOffset, GpuBuffer dst, int dstOffset, int size) {
             events.add("copyBuffer:" + size);
         }

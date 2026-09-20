@@ -62,6 +62,12 @@ public enum Provider {
     /** Very Many Players — server-side player/entity optimization. */
     VMP("Very Many Players", "vmp"),
 
+    /** Optimized Block Entities (OBE) — dedicated block entity renderer replacement. */
+    OBE("Optimized Block Entities", "optimizedblockentities"),
+
+    /** Indium — Sodium-compatible Fabric Rendering API implementation. */
+    INDIUM("Indium", "indium"),
+
     /** Nobody handles this capability. */
     NONE("Not Handled", null);
 
@@ -91,6 +97,11 @@ public enum Provider {
             if (this == VMP) {
                 return FabricLoader.getInstance().isModLoaded("vmp")
                     || FabricLoader.getInstance().isModLoaded("very-many-players");
+            }
+            // Optimized Block Entities can be named 'optimizedblockentities' or 'obe'.
+            if (this == OBE) {
+                return FabricLoader.getInstance().isModLoaded("optimizedblockentities")
+                    || FabricLoader.getInstance().isModLoaded("obe");
             }
             return FabricLoader.getInstance().isModLoaded(modId);
         } catch (Throwable t) {

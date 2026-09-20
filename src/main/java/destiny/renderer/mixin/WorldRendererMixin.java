@@ -10,6 +10,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 /**
  * Mixin into {@link WorldRenderer} to intercept the terrain rendering pass.
@@ -33,6 +34,18 @@ public abstract class WorldRendererMixin {
 
     private static final float[] currentProj = new float[16];
     private static final float[] currentView = new float[16];
+    private static final org.joml.Matrix4f SCRATCH_MVP = new org.joml.Matrix4f();
+    private static final float[] SCRATCH_MVP_ARR = new float[16];
+
+    @Inject(method = "renderBlockLayers", at = @At("RETURN"))
+    private void caesium$captureVanillaTerrainContract(
+        org.joml.Matrix4fc positionMatrix, double cameraX, double cameraY, double cameraZ,
+        CallbackInfoReturnable<net.minecraft.client.render.SectionRenderState> cir
+    ) {
+        if (DestinyRenderer.isActive() && destiny.renderer.compat.WorkAllotment.ownsTerrain()) {
+            caesium.integration.CaesiumIntegration.observeVanillaTerrainState(cir.getReturnValue());
+        }
+    }
 
     /**
      * Intercepts the begin of each render frame to notify the active backend and capture transformation matrices.
@@ -66,6 +79,7 @@ public abstract class WorldRendererMixin {
 
         if (projectionMatrix != null) projectionMatrix.get(currentProj);
         if (viewMatrix != null) viewMatrix.get(currentView);
+        caesium.integration.CaesiumIntegration.captureFrameMatrices(projectionMatrix, viewMatrix);
 
         backend.beginFrame();
         destiny.renderer.memory.RendererArenaManager.beginFrame();
@@ -94,8 +108,14 @@ public abstract class WorldRendererMixin {
         boolean bl,
         CallbackInfo ci
     ) {
+        destiny.renderer.hud.CaesiumFrameProfiler.beginAnimations();
+        if (projectionMatrix != null && positionMatrix != null) {
+            SCRATCH_MVP.set(projectionMatrix).mul(positionMatrix).get(SCRATCH_MVP_ARR);
+            destiny.renderer.cull.ParticleFrustumTracker.update(SCRATCH_MVP_ARR);
+        }
         destiny.renderer.render.SpriteVisibilityTracker.capture(
-            positionMatrix, viewMatrix, camera == null ? null : camera.getCameraPos());
+            projectionMatrix, viewMatrix, camera == null ? null : camera.getCameraPos());
+        destiny.renderer.hud.CaesiumFrameProfiler.endAnimations();
     }
 
     /**
@@ -126,39 +146,6 @@ public abstract class WorldRendererMixin {
         if (backend != null) backend.endFrame();
     }
 
-    /**
-     * Drives the per-frame deferred-rebuild budget. Lives on {@link WorldRenderer#render}
-     * TAIL specifically (rather than {@link net.minecraft.client.gui.hud.InGameHud#render}
-     * TAIL, which is where the burst used to land) because the WorldRenderer TAIL runs
-     * earlier in the frame — before the HUD, before present, before vsync wait. Rebuilds
-     * land in a part of the frame that has slack; the tail-side alternative would put the
-     * burst right next to the present, which is exactly the worst place for it on a
-     * frame that is already struggling.
-     *
-     * <p>Runs unconditionally because the deferred-rebuild queue exists regardless of
-     * whether Caesium owns terrain — vanilla chunk rebuilds are throttled by the same
-     * queue when {@link destiny.renderer.config.RendererConfig#deferChunkUpdates} is on.
-     * The queue itself no-ops when nothing is queued.
-     */
-    @Inject(
-        method = "render",
-        at = @At("TAIL")
-    )
-    private void caesium$driveDeferredRebuild(
-        net.minecraft.client.util.ObjectAllocator allocator,
-        net.minecraft.client.render.RenderTickCounter tickCounter,
-        boolean renderBlockOutline,
-        net.minecraft.client.render.Camera camera,
-        org.joml.Matrix4f positionMatrix,
-        org.joml.Matrix4f projectionMatrix,
-        org.joml.Matrix4f viewMatrix,
-        com.mojang.blaze3d.buffers.GpuBufferSlice gpuBufferSlice,
-        org.joml.Vector4f vector4f,
-        boolean bl,
-        CallbackInfo ci
-    ) {
-        destiny.renderer.chunk.DeferredRebuildQueue.processFrame();
-    }
 
     /**
      * Intercepts the world renderer reload (F3+A or graphics settings change).
@@ -174,33 +161,7 @@ public abstract class WorldRendererMixin {
         destiny.renderer.render.SpriteVisibilityTracker.invalidateAll();
     }
 
-    /**
-     * Intercepts vanilla block layer rendering pass, executing GPU-driven MDI
-     * rendering via DestinyRenderer and returning an empty SectionRenderState to cancel vanilla CPU chunk draws safely.
-     */
-    // ------------------------------------------------------------------------
-    // NOTE ON THE CUSTOM TERRAIN PASS (Minecraft 1.21.11)
-    // ------------------------------------------------------------------------
-    // There is deliberately no injection into renderBlockLayers here.
-    //
-    // As of 1.21.11 Mojang moved terrain submission behind the blaze3d abstraction
-    // (com.mojang.blaze3d.systems.GpuDevice / RenderPass). renderBlockLayers now returns
-    // a SectionRenderState record built from a GpuTextureView plus an EnumMap of
-    // RenderPass.RenderObject draw lists — there is no "empty" instance to hand back and
-    // no supported way to fabricate one.
-    //
-    // Two hard consequences:
-    //   1. Raw LWJGL calls (glMultiDrawElementsIndirect and friends) can no longer be
-    //      safely interleaved with vanilla rendering. blaze3d caches pipeline state and
-    //      raw GL mutations corrupt its assumptions, producing driver-level errors.
-    //   2. RenderPass exposes drawIndexed / drawMultipleIndexed only. There is no
-    //      multi-draw-indirect entry point to bind our indirect command buffer to.
-    //
-    // Replacing terrain therefore means porting the whole geometry pipeline onto
-    // blaze3d RenderPipeline objects — a very large piece of work, and precisely what
-    // Sodium maintains full time. Until that port exists, DestinyRenderer lets vanilla
-    // own terrain submission and concentrates on the wins it can deliver safely:
-    // culling, meshing throughput, particle/animation control and the settings system.
-    //
-    // See docs/ARCHITECTURE.md for the migration plan.
+    // renderBlockLayers is the extraction seam. Actual per-group submission/cancellation
+    // lives in SectionRenderStateMixin, where Minecraft has selected the authoritative
+    // color/depth framebuffer and terrain layer group.
 }

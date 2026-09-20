@@ -128,6 +128,7 @@ final class SwapchainTarget implements RenderTarget {
     private long pipelineLayout;
     private long pipeline;
     private long terrainPipeline;
+    private long bakedTerrainPipeline;
     private long descriptorPool;
     private long descriptorSet;
     private long setLayout;
@@ -497,11 +498,18 @@ final class SwapchainTarget implements RenderTarget {
 
     @Override
     public GpuPipeline pipeline(GpuCommandEncoder.VertexLayout layout) {
+        if (layout == GpuCommandEncoder.VertexLayout.TERRAIN_BAKED) {
+            if (bakedTerrainPipeline == 0L) {
+                bakedTerrainPipeline = VulkanPipelineFactory.createForLayout(device, renderPass,
+                        pipelineLayout, setLayout, width, height, layout);
+            }
+            return new Pipeline(bakedTerrainPipeline);
+        }
         if (layout == GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F) {
             if (terrainPipeline == 0L) {
                 terrainPipeline = VulkanPipelineFactory.createForLayout(device, renderPass,
                         pipelineLayout, setLayout, width, height,
-                        GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F);
+                        layout);
                 if (terrainPipeline == 0L) {
                     throw new IllegalStateException("Caesium: terrain pipeline creation failed");
                 }
@@ -567,6 +575,10 @@ final class SwapchainTarget implements RenderTarget {
                     acquireSemaphores[frameIndex], 0L, pIndex);
             if (err == VK_ERROR_OUT_OF_DATE_KHR) {
                 return -1;
+            }
+            if (err == VK_SUBOPTIMAL_KHR) {
+                currentImageIndex = pIndex.get(0);
+                return currentImageIndex;
             }
             if (err != VK_SUCCESS) {
                 throw new IllegalStateException("Caesium: vkAcquireNextImageKHR failed: " + err);
@@ -783,6 +795,10 @@ final class SwapchainTarget implements RenderTarget {
         if (terrainPipeline != 0L) {
             VK10.vkDestroyPipeline(device, terrainPipeline, null);
             terrainPipeline = 0L;
+        }
+        if (bakedTerrainPipeline != 0L) {
+            VK10.vkDestroyPipeline(device, bakedTerrainPipeline, null);
+            bakedTerrainPipeline = 0L;
         }
         if (pipelineLayout != 0L) {
             VK10.vkDestroyPipelineLayout(device, pipelineLayout, null);

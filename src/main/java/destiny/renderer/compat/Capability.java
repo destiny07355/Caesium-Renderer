@@ -34,6 +34,10 @@ public enum Capability {
     BLOCK_CULLING("Block Face Culling",
         "Skips block and fluid faces hidden by neighbouring geometry."),
 
+    /** Static block entity mesh optimization (OBE-style). */
+    BLOCK_ENTITY_OPTIMIZATION("Block Entity Optimization",
+        "Bakes static chests, signs, and beds into terrain meshes."),
+
     /** Ownership of the shader pipeline. */
     SHADER_PIPELINE("Shader Pipeline",
         "Owns terrain/entity shader programs."),

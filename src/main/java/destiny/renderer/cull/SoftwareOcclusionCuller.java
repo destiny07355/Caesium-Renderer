@@ -10,7 +10,7 @@ public final class SoftwareOcclusionCuller {
 
     private final float[] depthBuffer = new float[BUFFER_SIZE];
     private final float[] mvpMatrix = new float[16];
-    private boolean enabled = true;
+    private boolean enabled = false;
 
     private final float[] cornerX = new float[8];
     private final float[] cornerY = new float[8];
@@ -86,6 +86,21 @@ public final class SoftwareOcclusionCuller {
                 }
             }
         }
+    }
+
+    /**
+     * Admits a section to the depth buffer only when extraction proved that its entire
+     * volume is opaque. A section merely containing opaque blocks is not a safe occluder:
+     * filling its projected AABB would hide geometry visible through caves and openings.
+     *
+     * @return true when the section was accepted and rasterized
+     */
+    public boolean rasterizeSection(float minX, float minY, float minZ,
+                                    float maxX, float maxY, float maxZ,
+                                    boolean fullyOpaque) {
+        if (!enabled || !fullyOpaque) return false;
+        rasterizeOccluder(minX, minY, minZ, maxX, maxY, maxZ);
+        return true;
     }
 
     public boolean isOccluded(float minX, float minY, float minZ, float maxX, float maxY, float maxZ) {

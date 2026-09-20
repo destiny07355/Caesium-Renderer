@@ -62,10 +62,7 @@ processResources {
 // version-locked, meaning a 21-preview jar refuses to load on 22+. Targeting 25 keeps
 // the bytecode portable across 22-25 with no launch flags.
 //
-// A separate Java 21 variant is planned; it will need the FFM-dependent terrain classes
-// replaced with a ByteBuffer-based path rather than simply lowering the release version.
-// See docs/ARCHITECTURE.md.
-def javaTarget = 25
+def javaTarget = 21
 
 java {
     toolchain {
@@ -77,6 +74,13 @@ java {
 tasks.withType(JavaCompile).configureEach {
     it.options.release = javaTarget
     it.options.encoding = "UTF-8"
+    it.options.compilerArgs += ["--enable-preview"]
+}
+tasks.withType(JavaExec).configureEach {
+    jvmArgs '--enable-preview'
+}
+test {
+    jvmArgs '--enable-preview'
 }
 
 // Dev run JVM arguments for ZGC, FFM API, and Vector API
@@ -110,8 +114,7 @@ jar {
     from("LICENSE") {
         rename { "${it}_${project.archives_base_name}" }
     }
-    // Commercial release: strip development test frameworks and internal benchmark tools
-    exclude "destiny/renderer/bench/**"
+    // Commercial release: strip internal debug tools
     exclude "caesium/engine/debug/**"
 }
 
@@ -208,6 +211,169 @@ tasks.register('headlessTerrainVulkanTest', JavaExec) {
     systemProperty 'caesium.engine.classes', sourceSets.main.output.classesDirs.asPath
     jvmArgs '-Djava.awt.headless=true'
     maxHeapSize = '1g'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('workStealingPoolRaceTest', JavaExec) {
+    group = 'verification'
+    description = 'Stress-tests WorkStealingPool construction and task execution for startup races.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.scheduler.WorkStealingPoolRaceTest'
+    maxHeapSize = '512m'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('workStealingPoolRaceTest')
+
+tasks.register('terrainSceneCorrectnessTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks terrain section identity and stale asynchronous mesh rejection.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.world.TerrainSceneCorrectnessTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('terrainSceneCorrectnessTest')
+
+tasks.register('terrainOwnershipGateTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks staged terrain ownership only arms after a complete valid frame.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.integration.TerrainOwnershipGateTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('terrainOwnershipGateTest')
+
+tasks.register('frustumCullingTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks conservative terrain section frustum culling.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.world.FrustumCullingTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('frustumCullingTest')
+
+tasks.register('softwareOcclusionCullerTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks that only explicitly fully opaque sections enter software occlusion.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.cull.SoftwareOcclusionCullerTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('translucencySorterTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks primitive translucency sorting and same-camera cache reuse.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.chunk.TranslucencySorterTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+tasks.register('meshingTelemetryTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks monotonic nanosecond meshing telemetry conversion.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.chunk.MeshingTelemetryTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('softwareOcclusionCullerTest')
+check.dependsOn tasks.named('translucencySorterTest')
+check.dependsOn tasks.named('meshingTelemetryTest')
+
+tasks.register('hardwareCapabilityDetectorTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks normalized integrated/discrete GPU classification.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.hardware.HardwareCapabilityDetectorTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('hardwareCapabilityDetectorTest')
+
+tasks.register('renderGraphLifecycleTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks render-pass resources are closed exactly once before backend shutdown.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.graph.RenderGraphLifecycleTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('renderGraphLifecycleTest')
+
+tasks.register('bakedQuadDecoderTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks baked-model positions, atlas UVs, light, tint, normals, and layer mapping.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'caesium.engine.world.BakedQuadDecoderTest'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('bakedQuadDecoderTest')
+
+tasks.register('discordRpcProtocolTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks Discord IPC framing, command payloads, and JSON escaping without Discord.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.rpc.DiscordRpcProtocolTest'
+    jvmArgs '-Djava.awt.headless=true'
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('discordRpcProtocolTest')
+
+tasks.register('multiVersionSystemTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks Java 21 and Java 25 dual platform systems and dynamic dispatch.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.system.MultiVersionSystemTest'
+    jvmArgs sharedJvmArgs
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('multiVersionSystemTest')
+
+tasks.register('threadPriorityManagerTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks ThreadTweak-inspired multi-tier thread priorities, core scaling, and adaptive worker priorities.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.scheduler.ThreadPriorityManagerTest'
+    jvmArgs sharedJvmArgs
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('threadPriorityManagerTest')
+
+tasks.register('blockEntityOptimizationTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks OBE static block entity registration, classification, invalidation, and cuboid generation.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.blockentity.BlockEntityOptimizationTest'
+    jvmArgs sharedJvmArgs
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('blockEntityOptimizationTest')
+
+tasks.register('worldLifecycleHardeningTest', JavaExec) {
+    group = 'verification'
+    description = 'Checks world lifecycle state cleanup, chunk unloads, and bitwise key unpacking.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.lifecycle.WorldLifecycleHardeningTest'
+    jvmArgs sharedJvmArgs
+    dependsOn 'compileTestJava', 'classes'
+}
+
+check.dependsOn tasks.named('worldLifecycleHardeningTest')
+
+tasks.register('discordRpcConnectionProbe', JavaExec) {
+    group = 'verification'
+    description = 'Probes a locally running Discord IPC endpoint and clears the temporary activity.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'destiny.renderer.rpc.DiscordRpcConnectionProbe'
+    jvmArgs '-Djava.awt.headless=true'
     dependsOn 'compileTestJava', 'classes'
 }
 

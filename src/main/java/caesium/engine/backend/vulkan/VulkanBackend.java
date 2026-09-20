@@ -104,7 +104,9 @@ public final class VulkanBackend implements GpuBackend {
     private int transferFamily = -1;
     private long commandPool;
     private final long[] commandBuffers = new long[FRAMES_IN_FLIGHT];
+    private final VkCommandBuffer[] vkCommandBuffers = new VkCommandBuffer[FRAMES_IN_FLIGHT];
     private final long[] fences = new long[FRAMES_IN_FLIGHT];
+    private VkQueue cachedGraphicsQueue;
 
     /** Frame slot selected by {@link #beginFrame(int)}; consumed by the next encoder. */
     private int currentFrameIndex;
@@ -404,6 +406,11 @@ public final class VulkanBackend implements GpuBackend {
             }
             device = new VkDevice(pDevice.get(0), physicalDevice, info);
             memFree(pDevice);
+
+            PointerBuffer pQueue = memAllocPointer(1);
+            VK10.vkGetDeviceQueue(device, graphicsFamily, 0, pQueue);
+            cachedGraphicsQueue = new VkQueue(pQueue.get(0), device);
+            memFree(pQueue);
         }
     }
 
@@ -433,6 +440,7 @@ public final class VulkanBackend implements GpuBackend {
             }
             for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
                 commandBuffers[i] = pBuffers.get(i);
+                vkCommandBuffers[i] = new VkCommandBuffer(commandBuffers[i], device);
             }
             memFree(pBuffers);
         }
@@ -505,20 +513,18 @@ public final class VulkanBackend implements GpuBackend {
     @Override
     public void beginFrame(int frameIndex) {
         currentFrameIndex = frameIndex;
-        if (window != null) {
-            // Acquire first: sets the swapchain image this frame will render into. On
-            // OUT_OF_DATE the window needs a resize-driven swapchain rebuild (later increment).
-            if (window.acquire(frameIndex) < 0) {
-                return;
-            }
-        }
         if (fences[frameIndex] != 0L) {
             try (MemoryStack stack = stackPush()) {
                 LongBuffer pFence = stack.mallocLong(1).put(0, fences[frameIndex]);
                 VK10.vkWaitForFences(device, pFence, true, Long.MAX_VALUE);
                 VK10.vkResetFences(device, pFence);
             }
-            VK10.vkResetCommandBuffer(new VkCommandBuffer(commandBuffers[frameIndex], device), 0);
+            VK10.vkResetCommandBuffer(vkCommandBuffers[frameIndex], 0);
+        }
+        if (window != null) {
+            if (window.acquire(frameIndex) < 0) {
+                return;
+            }
         }
     }
 
@@ -572,11 +578,7 @@ public final class VulkanBackend implements GpuBackend {
     }
 
     VkQueue graphicsVkQueue() {
-        try (MemoryStack stack = stackPush()) {
-            PointerBuffer pQueue = stack.mallocPointer(1);
-            VK10.vkGetDeviceQueue(device, graphicsFamily, 0, pQueue);
-            return new VkQueue(pQueue.get(0), device);
-        }
+        return cachedGraphicsQueue;
     }
 
     int findMemoryType(int typeBits, int propertyFlags) {
@@ -654,6 +656,9 @@ public final class VulkanBackend implements GpuBackend {
     private final class Encoder implements GpuCommandEncoder {
         private int frameIndex;
         private long cmdBuffer;
+        private VkCommandBuffer activeVkCmd;
+        private GpuPipeline lastPipeline;
+        private GpuBuffer lastUniformBuffer;
         private boolean began;
 
         @Override
@@ -662,11 +667,14 @@ public final class VulkanBackend implements GpuBackend {
             // known now (currentFrameIndex was set by beginFrame right after creation).
             frameIndex = currentFrameIndex % FRAMES_IN_FLIGHT;
             cmdBuffer = commandBuffers[frameIndex];
+            activeVkCmd = vkCommandBuffers[frameIndex];
+            lastPipeline = null;
+            lastUniformBuffer = null;
             try (MemoryStack stack = stackPush()) {
                 VkCommandBufferBeginInfo info = VkCommandBufferBeginInfo.callocStack(stack)
                         .sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
                         .flags(VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-                int err = VK10.vkBeginCommandBuffer(new VkCommandBuffer(cmdBuffer, device), info);
+                int err = VK10.vkBeginCommandBuffer(activeVkCmd, info);
                 if (err != VK_SUCCESS) {
                     throw new IllegalStateException("Caesium: vkBeginCommandBuffer failed: " + err);
                 }
@@ -686,11 +694,15 @@ public final class VulkanBackend implements GpuBackend {
 
         @Override
         public void bindPipeline(GpuPipeline pipeline) {
-            VK10.vkCmdBindPipeline(new VkCommandBuffer(cmdBuffer, device),
+            if (pipeline == lastPipeline) {
+                return;
+            }
+            lastPipeline = pipeline;
+            VK10.vkCmdBindPipeline(activeVkCmd,
                     VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle());
             RenderTarget t = activeTarget();
             try (MemoryStack stack = stackPush()) {
-                VK10.vkCmdBindDescriptorSets(new VkCommandBuffer(cmdBuffer, device),
+                VK10.vkCmdBindDescriptorSets(activeVkCmd,
                         VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, t.pipelineLayout(),
                         0, stack.longs(t.descriptorSet()), null);
             }
@@ -698,6 +710,10 @@ public final class VulkanBackend implements GpuBackend {
 
         @Override
         public void bindUniformBuffer(GpuBuffer buffer) {
+            if (buffer == lastUniformBuffer) {
+                return;
+            }
+            lastUniformBuffer = buffer;
             RenderTarget t = activeTarget();
             VulkanUniforms.writeSetToBuffer(device, t.descriptorSet(),
                     ((Buffer) buffer).handle(), ((Buffer) buffer).size());
@@ -715,25 +731,31 @@ public final class VulkanBackend implements GpuBackend {
             try (MemoryStack stack = stackPush()) {
                 LongBuffer pBuffer = stack.mallocLong(1).put(0, ((Buffer) buffer).handle());
                 LongBuffer offsets = stack.mallocLong(1).put(0, 0L);
-                VK10.vkCmdBindVertexBuffers(new VkCommandBuffer(cmdBuffer, device), 0, pBuffer, offsets);
+                VK10.vkCmdBindVertexBuffers(activeVkCmd, 0, pBuffer, offsets);
             }
         }
 
         @Override
         public void bindIndexBuffer(GpuBuffer buffer) {
-            VK10.vkCmdBindIndexBuffer(new VkCommandBuffer(cmdBuffer, device),
+            VK10.vkCmdBindIndexBuffer(activeVkCmd,
                     ((Buffer) buffer).handle(), 0L, VK10.VK_INDEX_TYPE_UINT32);
         }
 
         @Override
         public void draw(int vertexCount, int instanceCount) {
-            VK10.vkCmdDraw(new VkCommandBuffer(cmdBuffer, device), vertexCount, instanceCount, 0, 0);
+            VK10.vkCmdDraw(activeVkCmd, vertexCount, instanceCount, 0, 0);
         }
 
         @Override
         public void drawIndexed(int indexCount, int instanceCount) {
-            VK10.vkCmdDrawIndexed(new VkCommandBuffer(cmdBuffer, device),
+            VK10.vkCmdDrawIndexed(activeVkCmd,
                     indexCount, instanceCount, 0, 0, 0);
+        }
+
+        @Override
+        public void drawIndexedIndirect(GpuBuffer commands, int offset, int drawCount, int stride) {
+            VK10.vkCmdDrawIndexedIndirect(activeVkCmd,
+                    ((Buffer) commands).handle(), offset, drawCount, stride);
         }
 
         @Override
@@ -742,7 +764,7 @@ public final class VulkanBackend implements GpuBackend {
                 org.lwjgl.vulkan.VkBufferCopy.Buffer copy =
                         org.lwjgl.vulkan.VkBufferCopy.callocStack(1, stack);
                 copy.get(0).srcOffset(srcOffset).dstOffset(dstOffset).size(size);
-                VK10.vkCmdCopyBuffer(new VkCommandBuffer(cmdBuffer, device),
+                VK10.vkCmdCopyBuffer(activeVkCmd,
                         ((Buffer) src).handle(), ((Buffer) dst).handle(), copy);
             }
         }
@@ -751,9 +773,9 @@ public final class VulkanBackend implements GpuBackend {
         public void writeTimestamp(GpuTimer timer, boolean end) {
             if (timer instanceof Timer t) {
                 if (end) {
-                    t.recordEnd(cmdBuffer);
+                    t.recordEnd(activeVkCmd);
                 } else {
-                    t.recordStart(cmdBuffer);
+                    t.recordStart(activeVkCmd);
                 }
             }
         }
@@ -762,7 +784,7 @@ public final class VulkanBackend implements GpuBackend {
         public void end() {
             if (began) {
                 activeTarget().endRenderPass(cmdBuffer);
-                VK10.vkEndCommandBuffer(new VkCommandBuffer(cmdBuffer, device));
+                VK10.vkEndCommandBuffer(activeVkCmd);
                 began = false;
             }
         }
@@ -811,18 +833,27 @@ public final class VulkanBackend implements GpuBackend {
             }
         }
 
-        void recordStart(long cmdBuffer) {
+        void recordStart(VkCommandBuffer cmd) {
             if (pool != 0L) {
-                VK10.vkCmdWriteTimestamp(new VkCommandBuffer(cmdBuffer, device),
+                VK10.vkCmdResetQueryPool(cmd, pool, 0, QUERY_COUNT);
+                VK10.vkCmdWriteTimestamp(cmd,
                         org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, 0);
             }
         }
 
-        void recordEnd(long cmdBuffer) {
+        void recordEnd(VkCommandBuffer cmd) {
             if (pool != 0L) {
-                VK10.vkCmdWriteTimestamp(new VkCommandBuffer(cmdBuffer, device),
+                VK10.vkCmdWriteTimestamp(cmd,
                         org.lwjgl.vulkan.VK10.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, 1);
             }
+        }
+
+        void recordStart(long cmdBuffer) {
+            recordStart(new VkCommandBuffer(cmdBuffer, device));
+        }
+
+        void recordEnd(long cmdBuffer) {
+            recordEnd(new VkCommandBuffer(cmdBuffer, device));
         }
 
         @Override
@@ -855,21 +886,24 @@ public final class VulkanBackend implements GpuBackend {
     }
 
     // -------------------------------------------------------------------------
-    // Buffer (host-visible; written directly by the engine)
+    // Buffer (host-visible; persistently mapped directly by the engine)
     // -------------------------------------------------------------------------
 
     private final class Buffer implements GpuBuffer {
         private final Usage usage;
         private final int size;
-        private long handle;
-        private long memory;
+        private final long handle;
+        private final long memory;
+        private final long mappedAddress;
         private boolean destroyed;
 
         Buffer(Usage usage, int size) {
             this.usage = usage;
             this.size = size;
             handle = createBufferHandle(usage, size);
-            memory = allocateAndBindBufferMemory(handle);
+            long[] memAndMap = allocateAndBindBufferMemory(handle);
+            memory = memAndMap[0];
+            mappedAddress = memAndMap[1];
         }
 
         private long createBufferHandle(Usage usage, int size) {
@@ -889,7 +923,7 @@ public final class VulkanBackend implements GpuBackend {
             }
         }
 
-        private long allocateAndBindBufferMemory(long bufferHandle) {
+        private long[] allocateAndBindBufferMemory(long bufferHandle) {
             try (MemoryStack stack = stackPush()) {
                 VkMemoryRequirements req = VkMemoryRequirements.callocStack(stack);
                 VK10.vkGetBufferMemoryRequirements(device, bufferHandle, req);
@@ -910,20 +944,33 @@ public final class VulkanBackend implements GpuBackend {
                     VK10.vkFreeMemory(device, mem, null);
                     throw new IllegalStateException("Caesium: vkBindBufferMemory failed: " + err);
                 }
-                return mem;
+
+                PointerBuffer pp = stack.mallocPointer(1);
+                long mapped = 0L;
+                int mapErr = VK10.vkMapMemory(device, mem, 0L, req.size(), 0, pp);
+                if (mapErr == VK_SUCCESS) {
+                    mapped = pp.get(0);
+                }
+                return new long[] { mem, mapped };
             }
         }
 
         void write(int offset, ByteBuffer data) {
-            try (MemoryStack stack = stackPush()) {
-                PointerBuffer pp = stack.mallocPointer(1);
-                VK10.vkMapMemory(device, memory, offset, data.remaining(), 0, pp);
-                long mapped = pp.get(0);
-                if (mapped != 0L) {
-                    org.lwjgl.system.MemoryUtil.memCopy(
-                            org.lwjgl.system.MemoryUtil.memAddress(data), mapped, data.remaining());
+            int len = data.remaining();
+            if (mappedAddress != 0L) {
+                org.lwjgl.system.MemoryUtil.memCopy(
+                        org.lwjgl.system.MemoryUtil.memAddress(data), mappedAddress + offset, len);
+            } else {
+                try (MemoryStack stack = stackPush()) {
+                    PointerBuffer pp = stack.mallocPointer(1);
+                    VK10.vkMapMemory(device, memory, offset, len, 0, pp);
+                    long mapped = pp.get(0);
+                    if (mapped != 0L) {
+                        org.lwjgl.system.MemoryUtil.memCopy(
+                                org.lwjgl.system.MemoryUtil.memAddress(data), mapped, len);
+                    }
+                    VK10.vkUnmapMemory(device, memory);
                 }
-                VK10.vkUnmapMemory(device, memory);
             }
         }
 
@@ -945,6 +992,9 @@ public final class VulkanBackend implements GpuBackend {
         @Override
         public void destroy() {
             if (!destroyed) {
+                if (mappedAddress != 0L) {
+                    VK10.vkUnmapMemory(device, memory);
+                }
                 VK10.vkDestroyBuffer(device, handle, null);
                 VK10.vkFreeMemory(device, memory, null);
                 destroyed = true;

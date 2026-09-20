@@ -31,6 +31,8 @@ public abstract class ExplosionOptimizationMixin {
 
     /** Explosion particles arriving within this window count against one budget. */
     private static final long BURST_WINDOW_MS = 250L;
+    private static final long CLEANUP_INTERVAL_MS = 1_000L;
+    private static volatile long destinyrenderer$lastCleanupMs;
 
     private static long destinyrenderer$posKey(double x, double y, double z) {
         long bx = ((long) Math.floor(x)) >> 4;
@@ -63,6 +65,10 @@ public abstract class ExplosionOptimizationMixin {
         if (!isBlast) return;
 
         long now = System.currentTimeMillis();
+        if (now - destinyrenderer$lastCleanupMs >= CLEANUP_INTERVAL_MS) {
+            destinyrenderer$lastCleanupMs = now;
+            destinyrenderer$bursts.entrySet().removeIf(entry -> now - entry.getValue()[0] > CLEANUP_INTERVAL_MS);
+        }
         long key = destinyrenderer$posKey(x, y, z);
         long[] state = destinyrenderer$bursts.computeIfAbsent(key, k -> new long[]{now, 0L});
 

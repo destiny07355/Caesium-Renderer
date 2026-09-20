@@ -37,6 +37,18 @@ public interface BlockEntityCullMixin<T extends BlockEntity> {
             return;
         }
 
+        // True OBE (Optimized Block Entities): If statically baked into the terrain mesh, suppress dynamic rendering!
+        if (destiny.renderer.blockentity.BlockEntityOptimizationRegistry.isStaticallyBaked(blockEntity.getPos().asLong())) {
+            cir.setReturnValue(false);
+            return;
+        }
+
+        // Wall Occlusion Culling (EnhancedBlockEntities / EntityCulling style)
+        if (destiny.renderer.cull.BlockEntityOcclusionCuller.isOccluded(blockEntity, cameraPos)) {
+            cir.setReturnValue(false);
+            return;
+        }
+
         int limit = cfg.blockEntityRenderDistance;
         if (limit <= 0) return;
 

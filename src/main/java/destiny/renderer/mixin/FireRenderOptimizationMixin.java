@@ -14,9 +14,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /**
  * Controls the fire overlay drawn on burning entities.
  *
- * <p>Ground fire — the fire <em>blocks</em> left behind by explosions and flint and steel —
- * is handled separately in {@link GroundFireCullMixin}, because it goes through the chunk
- * geometry path rather than this entity overlay path.
+ * <p>Ground-fire blocks remain vanilla-rendered. This mixin only exposes the default-on
+ * entity-fire overlay override.
  */
 @Mixin(FireCommandRenderer.class)
 public abstract class FireRenderOptimizationMixin {

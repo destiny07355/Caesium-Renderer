@@ -1,5 +1,6 @@
 package destiny.renderer.render.drs;
 
+import destiny.renderer.hud.CaesiumFrameProfiler;
 import destiny.renderer.hud.PerformanceOverlay;
 
 public final class DynamicResolutionScaler {
@@ -8,6 +9,10 @@ public final class DynamicResolutionScaler {
     private static float currentScale = 1.0f;
     private static float targetScale = 1.0f;
     private static float sharpness = 0.5f;
+
+    private static double fastEmaMs = 16.67;
+    private static int framesStable = 0;
+    private static final int STABILITY_HOLD_FRAMES = 60; // Require 60 consecutive stable frames before recovering scale
 
     public static boolean isEnabled() {
         return enabled;
@@ -18,6 +23,7 @@ public final class DynamicResolutionScaler {
         if (!state) {
             currentScale = 1.0f;
             targetScale = 1.0f;
+            framesStable = 0;
         }
     }
 
@@ -36,20 +42,59 @@ public final class DynamicResolutionScaler {
     public static void update(double targetFrameMs) {
         if (!enabled) {
             currentScale = 1.0f;
+            targetScale = 1.0f;
+            framesStable = 0;
             return;
         }
 
         double avgMs = PerformanceOverlay.averageFrameMs();
         if (avgMs <= 0.0) return;
 
-        if (avgMs > targetFrameMs * 1.10) {
-            targetScale = Math.max(0.70f, targetScale - 0.05f);
-        } else if (avgMs < targetFrameMs * 0.85) {
-            targetScale = Math.min(1.0f, targetScale + 0.02f);
+        double p995Ms = PerformanceOverlay.percentileFrameMs995();
+        fastEmaMs = fastEmaMs * 0.70 + avgMs * 0.30;
+
+        double gpuMs = CaesiumFrameProfiler.getTotalGpuMs();
+
+        if (gpuMs > 0.5) {
+            // GPU frame time is available: only downscale when GPU fill-rate/shading is bottlenecked.
+            // Avoid downscaling during CPU-bound spikes (e.g. chunk rebuilds, entity ticking).
+            if (gpuMs > targetFrameMs * 1.20) {
+                framesStable = 0;
+                targetScale = Math.max(0.65f, targetScale - 0.10f);
+            } else if (gpuMs > targetFrameMs * 1.02) {
+                framesStable = 0;
+                targetScale = Math.max(0.70f, targetScale - 0.05f);
+            } else if (gpuMs < targetFrameMs * 0.82) {
+                framesStable++;
+                if (framesStable >= STABILITY_HOLD_FRAMES) {
+                    float deficit = 1.0f - targetScale;
+                    float recoveryStep = Math.max(0.005f, deficit * 0.05f);
+                    targetScale = Math.min(1.0f, targetScale + recoveryStep);
+                }
+            }
+        } else {
+            // Instantaneous Spike Detection fallback: if p99.5 or fast EMA exceeds target, drop scale immediately
+            if (p995Ms > targetFrameMs * 1.20 || fastEmaMs > targetFrameMs * 1.15) {
+                framesStable = 0; // Reset stability hold
+                targetScale = Math.max(0.65f, targetScale - 0.10f);
+            } else if (avgMs > targetFrameMs * 1.05) {
+                framesStable = 0;
+                targetScale = Math.max(0.70f, targetScale - 0.05f);
+            } else if (p995Ms < targetFrameMs * 0.85 && fastEmaMs < targetFrameMs * 0.80) {
+                // Smooth gradual recovery only after holding stable for STABILITY_HOLD_FRAMES
+                framesStable++;
+                if (framesStable >= STABILITY_HOLD_FRAMES) {
+                    float deficit = 1.0f - targetScale;
+                    float recoveryStep = Math.max(0.005f, deficit * 0.05f);
+                    targetScale = Math.min(1.0f, targetScale + recoveryStep);
+                }
+            }
         }
 
-        currentScale += (targetScale - currentScale) * 0.10f;
-        if (Math.abs(targetScale - currentScale) < 0.01f) {
+        // Asymmetric response: fast drop (0.35) to protect 1% low, ultra-smooth recovery (0.03) to prevent resolution pumping
+        float lerpRate = targetScale < currentScale ? 0.35f : 0.03f;
+        currentScale += (targetScale - currentScale) * lerpRate;
+        if (Math.abs(targetScale - currentScale) < 0.003f) {
             currentScale = targetScale;
         }
     }

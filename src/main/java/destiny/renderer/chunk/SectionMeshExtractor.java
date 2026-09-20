@@ -17,9 +17,11 @@ private static final int[][][] FACE_CORNERS={
 private static final int[][] FACE_NORMAL={{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},};
 
 public static RenderWorld.SectionMesh extract(ChunkSectionPos pos,ChunkSectionData data,int revision){
-float[] positions=new float[4096*6*4*3];
-float[] colors=new float[4096*6*4*4];
-int[] indices=new int[4096*6*6];
+int faceCount=countVisibleFaces(data);
+if(faceCount==0)return null;
+float[] positions=new float[faceCount*4*3];
+float[] colors=new float[faceCount*4*4];
+int[] indices=new int[faceCount*6];
 int vertCount=0;
 int idxCount=0;
 int ox=data.originX;
@@ -40,7 +42,7 @@ int bz=lz-1;
 for(int face=0;face<6;face++){
 int[] n=FACE_NORMAL[face];
 int nlx=lx+n[0],nly=ly+n[1],nlz=lz+n[2];
-if(nlx>=0&&nly>=0&&nlz>=0&&nlx<ChunkSectionData.PADDED_DIM&&nly<ChunkSectionData.PADDED_DIM&&nlz<ChunkSectionData.PADDED_DIM&&BlockStateLUT.isOpaqueCube(data.getStateId(nlx,nly,nlz)))continue;
+if(data.isOpaque(nlx,nly,nlz))continue;
 float light=FACE_LIGHT[face];
 int[] corner0=FACE_CORNERS[face][0];
 int[] corner1=FACE_CORNERS[face][1];
@@ -58,28 +60,42 @@ vertCount+=4;
 }
 }
 }
-if(vertCount==0)return null;
-float[] outPositions=new float[vertCount*3];
-float[] outColors=new float[vertCount*4];
-System.arraycopy(positions,0,outPositions,0,vertCount*3);
-System.arraycopy(colors,0,outColors,0,vertCount*4);
-int[] outIndices=new int[idxCount];
-System.arraycopy(indices,0,outIndices,0,idxCount);
-return new RenderWorld.SectionMesh(pos.getSectionX(),pos.getSectionZ(),pos.getSectionY(),revision,outPositions,outColors,outIndices);
+return new RenderWorld.SectionMesh(pos.getSectionX(),pos.getSectionZ(),pos.getSectionY(),revision,positions,colors,indices);
+}
+
+private static int countVisibleFaces(ChunkSectionData data){
+int faces=0;
+for(int ly=1;ly<=16;ly++){
+for(int lz=1;lz<=16;lz++){
+for(int lx=1;lx<=16;lx++){
+int stateId=data.getStateId(lx,ly,lz);
+if(stateId==0||BlockStateLUT.isEmpty(stateId))continue;
+for(int face=0;face<6;face++){
+int[] n=FACE_NORMAL[face];
+if(!data.isOpaque(lx+n[0],ly+n[1],lz+n[2]))faces++;
+}
+}
+}
+}
+return faces;
 }
 
 private static void emit(float[] positions,float[] colors,int vert,float ax,float ay,float az,float bx,float by,float bz,float cx,float cy,float cz,float dx,float dy,float dz,float r,float g,float bl){
-float[][] v={{ax,ay,az},{bx,by,bz},{cx,cy,cz},{dx,dy,dz}};
-for(int i=0;i<4;i++){
-int pi=(vert+i)*3;
-positions[pi]=v[i][0];
-positions[pi+1]=v[i][1];
-positions[pi+2]=v[i][2];
-int ci=(vert+i)*4;
+putVertex(positions,colors,vert,ax,ay,az,r,g,bl);
+putVertex(positions,colors,vert+1,bx,by,bz,r,g,bl);
+putVertex(positions,colors,vert+2,cx,cy,cz,r,g,bl);
+putVertex(positions,colors,vert+3,dx,dy,dz,r,g,bl);
+}
+
+private static void putVertex(float[] positions,float[] colors,int vert,float x,float y,float z,float r,float g,float b){
+int pi=vert*3;
+positions[pi]=x;
+positions[pi+1]=y;
+positions[pi+2]=z;
+int ci=vert*4;
 colors[ci]=r;
 colors[ci+1]=g;
-colors[ci+2]=bl;
+colors[ci+2]=b;
 colors[ci+3]=1f;
-}
 }
 }

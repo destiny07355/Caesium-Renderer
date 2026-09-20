@@ -11,6 +11,7 @@ import net.minecraft.client.gui.widget.ClickableWidget;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Consumer;
 
 /**
@@ -28,9 +29,10 @@ public final class CategorySidebar {
     private OptionPage selectedPage;
     private String filterQuery = "";
 
-    private static final int ITEM_H   = 26;
+    private static final int ITEM_H   = 20;
     private static final int ITEM_GAP = 2;
-    private static final int PAD_TOP  = 6;
+    private static final int PAD_TOP  = 4;
+    private static final int SECTION_H = 14;
 
     public CategorySidebar(List<OptionPage> pages, OptionPage initial, Consumer<OptionPage> onSelect) {
         this.pages = pages;
@@ -49,13 +51,28 @@ public final class CategorySidebar {
     public OptionPage getSelectedPage()           { return selectedPage; }
 
     public void setFilterQuery(String q) {
-        this.filterQuery = q == null ? "" : q.toLowerCase().trim();
+        this.filterQuery = q == null ? "" : q.toLowerCase(Locale.ROOT).trim();
         updateHeight();
     }
 
     private void updateHeight() {
-        int h = PAD_TOP + itemList.size() * (ITEM_H + ITEM_GAP) + 4;
+        int sections = 0;
+        String previous = null;
+        for (OptionPage page : itemList) {
+            String section = sectionFor(page);
+            if (!section.equals(previous)) sections++;
+            previous = section;
+        }
+        int h = PAD_TOP + sections * SECTION_H + itemList.size() * (ITEM_H + ITEM_GAP) + 4;
         scroll.setContentHeight(h);
+    }
+
+    private static String sectionFor(OptionPage page) {
+        return switch (page.getId()) {
+            case "presets", "appearance", "general" -> "PLAY";
+            case "quality", "details", "animations", "particles", "performance" -> "GRAPHICS";
+            default -> "TOOLS & DIAGNOSTICS";
+        };
     }
 
     public boolean mouseScrolled(double mx, double my, double amount) {
@@ -67,7 +84,13 @@ public final class CategorySidebar {
         if (scroll.mouseClicked(mx, my, button)) return true;
 
         int curY = y + PAD_TOP - (int) scroll.getScrollOffset();
+        String previousSection = null;
         for (OptionPage page : itemList) {
+            String section = sectionFor(page);
+            if (!section.equals(previousSection)) {
+                curY += SECTION_H;
+                previousSection = section;
+            }
             int rowY = Math.max(y, curY);
             int rowY2 = Math.min(y + height, curY + ITEM_H);
             if (my >= rowY && my <= rowY2 && mx >= x + 4 && mx <= x + width - 4) {
@@ -100,7 +123,20 @@ public final class CategorySidebar {
         scroll.beginScissor(ctx);
 
         int curY = y + PAD_TOP - (int) scroll.getScrollOffset();
+        String previousSection = null;
         for (OptionPage page : itemList) {
+            String section = sectionFor(page);
+            if (!section.equals(previousSection)) {
+                int labelY = curY + 3;
+                if (labelY >= y && labelY < y + height) {
+                    ctx.drawText(tr, CaesiumFont.text(section), x + 9, labelY,
+                        CaesiumTheme.TEXT_DISABLED, false);
+                    ctx.fill(x + 9 + tr.getWidth(section) + 5, labelY + 4,
+                        x + width - 9, labelY + 5, CaesiumTheme.borderSubtle());
+                }
+                curY += SECTION_H;
+                previousSection = section;
+            }
             int itemX = x + 4;
             int itemW = width - 8;
 

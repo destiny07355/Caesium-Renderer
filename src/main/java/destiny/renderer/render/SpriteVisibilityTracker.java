@@ -6,9 +6,7 @@ import net.minecraft.block.AbstractFireBlock;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.Frustum;
 import net.minecraft.fluid.Fluids;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.ChunkSectionPos;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
@@ -19,25 +17,11 @@ import org.joml.Matrix4f;
 import java.util.function.Predicate;
 
 /**
- * Per-frame view-frustum visibility for the animated-texture categories.
+ * Per-frame view-frustum visibility for animated-texture categories.
  *
- * <p>Vanilla advances every animated sprite (fire, water, lava, portals, …) every frame
- * regardless of whether anything on screen uses it, then re-uploads the dirty regions of
- * the atlas. In a burning field that is per-frame CPU + GPU work for textures the camera
- * is not even looking at. This tracker answers the question the animation controller needs
- * — <em>"is there any visible block of this texture's category right now?"</em> — so the
- * controller can freeze exactly the categories that are off-screen.
- *
- * <p>Answers are produced from a coarse but cheap signal: each chunk section keeps a
- * cached bitmask of which animated categories it contains (computed lazily via the section
- * palette, invalidated on rebuild), and each scan ORs together the masks of the sections
- * that intersect the current view frustum.
- *
- * <h2>Cost</h2>
- * A scan iterates one column AABB test per loaded chunk column (≈ a few hundred) and a
- * cached mask lookup per section that survives the column test. Sections are only actually
- * classified on first sight. Scans are throttled to {@link #SCAN_INTERVAL_MS} and are a
- * no-op when the world, camera or toggle are absent.
+ * <p>Freezes off-screen texture animations (fire, water, lava, portals, sculk)
+ * without ever stalling the render thread. Section classification is cached
+ * and rate-limited to prevent frame drops during world loading or teleportation.
  */
 public final class SpriteVisibilityTracker {
 
@@ -47,17 +31,26 @@ public final class SpriteVisibilityTracker {
     public static final int CAT_PORTAL = 8;
     public static final int CAT_SCULK  = 16;
 
-    /** Recompute the visible set at most this often; a one-frame delay is imperceptible. */
-    private static final long SCAN_INTERVAL_MS = 100L;
+    /** Recompute the visible set at most 4 times a second. */
+    private static final long SCAN_INTERVAL_MS = 250L;
 
-    /** Cached per-section animated-category bitmask, keyed by packed section position. */
-    private static final ConcurrentHashMap<Long, Byte> SECTION_MASKS = new ConcurrentHashMap<>();
+    /** Maximum new unclassified sections evaluated per scan to keep frame time < 0.2ms. */
+    private static final int MAX_NEW_CLASSIFICATIONS_PER_SCAN = 16;
 
-    private static volatile int visibleCategories = 0;
+    /** Cached per-section animated-category bitmask in an unboxed open-addressed primitive cache. */
+    private static final int CACHE_CAPACITY = 8192;
+    private static final int CACHE_MASK = CACHE_CAPACITY - 1;
+    private static final long[] CACHE_KEYS = new long[CACHE_CAPACITY];
+    private static final byte[] CACHE_MASKS = new byte[CACHE_CAPACITY];
+    private static final boolean[] CACHE_PRESENT = new boolean[CACHE_CAPACITY];
+    private static final java.lang.invoke.VarHandle PRESENT_VH =
+        java.lang.invoke.MethodHandles.arrayElementVarHandle(boolean[].class);
+    private static final Object CACHE_LOCK = new Object();
+
+    private static volatile int visibleCategories = 0x1F;
     private static long lastScanMs = 0L;
-    private static Matrix4f projection = null;
-    private static Matrix4f view = null;
-    private static Vec3d cameraPos = null;
+    private static final Matrix4f SCAN_MVP = new Matrix4f();
+    private static final float[] SCAN_MVP_VALUES = new float[16];
 
     private static final Predicate<BlockState> IS_FIRE =
         s -> s.getBlock() instanceof AbstractFireBlock;
@@ -78,25 +71,49 @@ public final class SpriteVisibilityTracker {
         return (visibleCategories & categoryBit) != 0;
     }
 
+    private static double lastCamX = 0, lastCamY = 0, lastCamZ = 0;
+    private static boolean hasLastCam = false;
+    private static World lastWorld = null;
+
     /**
-     * Records the camera state for this frame. Called unconditionally from
-     * {@code WorldRenderer.render} so the animation policy never depends on which backend
-     * owns terrain.
+     * Records the camera state for this frame and triggers a lightweight throttled scan.
      */
     public static void capture(Matrix4f projectionMatrix, Matrix4f viewMatrix, Vec3d cameraPosition) {
+        // Always refresh policy so toggles recover immediately, even when visibility
+        // scanning is disabled or the world is transitioning.
+        SpriteAnimationController.updateFramePolicy();
         if (projectionMatrix == null || viewMatrix == null || cameraPosition == null) return;
-        projection = projectionMatrix;
-        view = viewMatrix;
-        cameraPos = cameraPosition;
 
         MinecraftClient client = MinecraftClient.getInstance();
         if (client == null || client.world == null) return;
-        if (!RendererConfig.get().animateOnlyVisibleTextures) return;
+        if (!RendererConfig.get().animateOnlyVisibleTextures) {
+            visibleCategories = 0x1F;
+            return;
+        }
 
         long now = System.currentTimeMillis();
-        if (now - lastScanMs < SCAN_INTERVAL_MS) return;
+        boolean forceScan = false;
+        if (client.world != lastWorld) {
+            lastWorld = client.world;
+            forceScan = true;
+        } else if (hasLastCam) {
+            double dx = cameraPosition.x - lastCamX;
+            double dy = cameraPosition.y - lastCamY;
+            double dz = cameraPosition.z - lastCamZ;
+            if (dx * dx + dy * dy + dz * dz > 32.0 * 32.0) { // teleport / sudden jump > 32 blocks
+                forceScan = true;
+            }
+        }
+        lastCamX = cameraPosition.x;
+        lastCamY = cameraPosition.y;
+        lastCamZ = cameraPosition.z;
+        hasLastCam = true;
+
+        if (!forceScan && (now - lastScanMs < SCAN_INTERVAL_MS)) return;
         lastScanMs = now;
 
+        projectionMatrix.mul(viewMatrix, SCAN_MVP).get(SCAN_MVP_VALUES);
+        destiny.renderer.cull.VisibilitySystem.getTerrainFrustum().update(SCAN_MVP_VALUES);
         scan(client.world, cameraPosition);
     }
 
@@ -105,12 +122,16 @@ public final class SpriteVisibilityTracker {
         destiny.renderer.cull.FusedFrustumCuller frustum = destiny.renderer.cull.VisibilitySystem.getTerrainFrustum();
 
         ChunkSectionPos cameraSection = ChunkSectionPos.from(camera);
-        int radius = MinecraftClient.getInstance().options.getClampedViewDistance();
+        int radius = Math.min(12, MinecraftClient.getInstance().options.getClampedViewDistance());
         int bottomSection = world.getBottomSectionCoord();
         int topSection = world.getTopSectionCoord();
 
         int camSecX = cameraSection.getSectionX();
         int camSecZ = cameraSection.getSectionZ();
+
+        long scanStartNs = System.nanoTime();
+        long maxScanTimeNs = 150_000L; // 0.15 ms wall-clock budget to prevent scan spikes
+        int classifications = 0;
 
         for (int cx = camSecX - radius; cx <= camSecX + radius; cx++) {
             for (int cz = camSecZ - radius; cz <= camSecZ + radius; cz++) {
@@ -126,7 +147,25 @@ public final class SpriteVisibilityTracker {
                     int secMinY = sy << 4;
                     if (!frustum.isSectionVisible(secMinX, secMinY, secMinZ)) continue;
 
-                    int mask = sectionMask(chunk, sy, bottomSection);
+                    long key = packSectionKey(cx, sy, cz);
+                    int cached = getCachedMask(key);
+
+                    int mask;
+                    if (cached != -1) {
+                        mask = cached;
+                    } else if (classifications < MAX_NEW_CLASSIFICATIONS_PER_SCAN
+                            && (System.nanoTime() - scanStartNs) < maxScanTimeNs) {
+                        mask = classifySection(chunk, sy, bottomSection);
+                        putCachedMask(key, (byte) mask);
+                        classifications++;
+                    } else {
+                        // Stop the entire scan once its work budget is exhausted. Returning
+                        // a conservative visible result preserves visuals and avoids walking
+                        // the rest of the loaded section grid with no useful classification.
+                        visibleCategories = 0x1F;
+                        return;
+                    }
+
                     if (mask != 0) {
                         newVisibleCategories |= mask;
                         if (newVisibleCategories == 0x1F) {
@@ -141,13 +180,39 @@ public final class SpriteVisibilityTracker {
         visibleCategories = newVisibleCategories;
     }
 
-    private static int sectionMask(WorldChunk chunk, int sectionCoord, int bottomSectionCoord) {
-        long key = packSectionKey(chunk.getPos().x, sectionCoord, chunk.getPos().z);
-        Byte cached = SECTION_MASKS.get(key);
-        if (cached != null) {
-            return cached & 0xFF;
+    private static int getCachedMask(long key) {
+        int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+        int idx = hash & CACHE_MASK;
+        for (int i = 0; i < 16; i++) {
+            int slot = (idx + i) & CACHE_MASK;
+            boolean present = (boolean) PRESENT_VH.getAcquire(CACHE_PRESENT, slot);
+            if (!present) return -1;
+            if (CACHE_KEYS[slot] == key) return CACHE_MASKS[slot] & 0xFF;
         }
+        return -1;
+    }
 
+    private static void putCachedMask(long key, byte mask) {
+        int hash = (int) (key ^ (key >>> 32)) * 0x9E3779B9;
+        int idx = hash & CACHE_MASK;
+        synchronized (CACHE_LOCK) {
+            for (int i = 0; i < 16; i++) {
+                int slot = (idx + i) & CACHE_MASK;
+                boolean present = (boolean) PRESENT_VH.get(CACHE_PRESENT, slot);
+                if (!present || CACHE_KEYS[slot] == key) {
+                    CACHE_KEYS[slot] = key;
+                    CACHE_MASKS[slot] = mask;
+                    PRESENT_VH.setRelease(CACHE_PRESENT, slot, true);
+                    return;
+                }
+            }
+            CACHE_KEYS[idx] = key;
+            CACHE_MASKS[idx] = mask;
+            PRESENT_VH.setRelease(CACHE_PRESENT, idx, true);
+        }
+    }
+
+    private static int classifySection(WorldChunk chunk, int sectionCoord, int bottomSectionCoord) {
         int sectionIdx = sectionCoord - bottomSectionCoord;
         ChunkSection[] sections = chunk.getSectionArray();
         if (sectionIdx < 0 || sectionIdx >= sections.length) return 0;
@@ -161,20 +226,54 @@ public final class SpriteVisibilityTracker {
         if (section.hasAny(IS_PORTAL)) mask |= CAT_PORTAL;
         if (section.hasAny(IS_SCULK)) mask |= CAT_SCULK;
 
-        SECTION_MASKS.put(key, (byte) mask);
         return mask;
     }
 
     /** Drops the cached mask for a section that was rebuilt. */
     public static void invalidateSection(long sectionKey) {
-        SECTION_MASKS.remove(sectionKey);
+        int hash = (int) (sectionKey ^ (sectionKey >>> 32)) * 0x9E3779B9;
+        int idx = hash & CACHE_MASK;
+        synchronized (CACHE_LOCK) {
+            for (int i = 0; i < 16; i++) {
+                int slot = (idx + i) & CACHE_MASK;
+                if ((boolean) PRESENT_VH.get(CACHE_PRESENT, slot) && CACHE_KEYS[slot] == sectionKey) {
+                    PRESENT_VH.setRelease(CACHE_PRESENT, slot, false);
+                    return;
+                }
+            }
+        }
     }
 
     /** Drops every cached mask, e.g. on world reload. */
     public static void invalidateAll() {
-        SECTION_MASKS.clear();
-        visibleCategories = 0;
+        synchronized (CACHE_LOCK) {
+            java.util.Arrays.fill(CACHE_PRESENT, false);
+        }
+        visibleCategories = 0x1F;
         lastScanMs = 0L;
+        hasLastCam = false;
+        lastWorld = null;
+    }
+
+    public static void clear() {
+        invalidateAll();
+    }
+
+    public static void invalidateChunk(long chunkX, long chunkZ) {
+        synchronized (CACHE_LOCK) {
+            for (int slot = 0; slot < CACHE_KEYS.length; slot++) {
+                if ((boolean) PRESENT_VH.get(CACHE_PRESENT, slot)) {
+                    long key = CACHE_KEYS[slot];
+                    int sx = (int) (key & 0x1FFFFF);
+                    if ((sx & 0x100000) != 0) sx |= 0xFFE00000;
+                    int sz = (int) ((key >>> 42) & 0x1FFFFF);
+                    if ((sz & 0x100000) != 0) sz |= 0xFFE00000;
+                    if (sx == (int) chunkX && sz == (int) chunkZ) {
+                        PRESENT_VH.setRelease(CACHE_PRESENT, slot, false);
+                    }
+                }
+            }
+        }
     }
 
     private static long packSectionKey(int x, int y, int z) {

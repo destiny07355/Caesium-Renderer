@@ -143,36 +143,36 @@ public final class CaesiumTheme {
     // LAYOUT DIMENSIONS
     // =========================================================================
 
-    public static int HEADER_H      = 38;  // px — top chrome band height
-    public static int FOOTER_H      = 34;  // px — bottom chrome band height
-    public static int SIDEBAR_W     = 120; // px — left category sidebar width
+    public static int HEADER_H      = 26;  // px — top chrome band height
+    public static int FOOTER_H      = 24;  // px — bottom chrome band height
+    public static int SIDEBAR_W     = 96;  // px — left category sidebar width
     public static int SCROLLBAR_W   = 5;   // px — scrollbar column width (reserved space)
 
     // =========================================================================
     // SPACING
     // =========================================================================
 
-    public static int ROW_H         = 44;  // px — height of each setting row
-    public static int ROW_GAP       = 3;   // px — gap between rows
-    public static int GROUP_GAP     = 14;  // px — gap between section groups
-    public static int SECTION_H     = 20;  // px — section header block height
-    public static int PANEL_MARGIN  = 10;  // px — margin between panels and screen edge
-    public static int PANEL_PADDING = 8;   // px — internal content padding inside panels
-    public static int ITEM_INDENT   = 10;  // px — left indent for row content
+    public static int ROW_H         = 22;  // px — height of each setting row (Sodium-sized)
+    public static int ROW_GAP       = 2;   // px — gap between rows
+    public static int GROUP_GAP     = 6;   // px — gap between section groups
+    public static int SECTION_H     = 15;  // px — section header block height
+    public static int PANEL_MARGIN  = 6;   // px — margin between panels and screen edge
+    public static int PANEL_PADDING = 5;   // px — internal content padding inside panels
+    public static int ITEM_INDENT   = 8;   // px — left indent for row content
 
     // =========================================================================
     // COMPONENT DEFAULTS (override per component if needed)
     // =========================================================================
 
-    public static int CHECKBOX_SIZE      = 16;  // px — checkbox box side length
-    public static int SLIDER_TRACK_W     = 68;  // px — slider track length
+    public static int CHECKBOX_SIZE      = 12;  // px — checkbox box side length
+    public static int SLIDER_TRACK_W     = 64;  // px — slider track length
     public static int SLIDER_TRACK_H     = 4;   // px — slider track height
     public static int SLIDER_KNOB_W      = 4;   // px — slider knob width
-    public static int SLIDER_VALUE_W     = 28;  // px — value readout gutter
-    public static int CYCLING_BOX_W      = 88;  // px — cycling control box width
-    public static int TOOLTIP_MAX_W      = 240; // px — maximum tooltip card width
-    public static int TOOLTIP_PADDING    = 8;   // px — tooltip internal padding
-    public static int SEARCH_H           = 22;  // px — search field height
+    public static int SLIDER_VALUE_W     = 24;  // px — value readout gutter
+    public static int CYCLING_BOX_W      = 76;  // px — cycling control box width
+    public static int TOOLTIP_MAX_W      = 220; // px — maximum tooltip card width
+    public static int TOOLTIP_PADDING    = 6;   // px — tooltip internal padding
+    public static int SEARCH_H           = 16;  // px — search field height
 
     // =========================================================================
     // HOVER BEHAVIOR

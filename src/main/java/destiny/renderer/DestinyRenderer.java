@@ -60,12 +60,19 @@ public final class DestinyRenderer implements ClientModInitializer {
     // ClientModInitializer
     // -------------------------------------------------------------------------
 
+    public static String getVersion() {
+        return net.fabricmc.loader.api.FabricLoader.getInstance().getModContainer("caesium")
+            .map(c -> c.getMetadata().getVersion().getFriendlyString())
+            .orElse("2.0.5");
+    }
+
     @Override
     public void onInitializeClient() {
+        String ver = getVersion();
         LOGGER.info("======================================================");
-        LOGGER.info(" Caesium v2.0.1 — Initializing");
+        LOGGER.info(" Caesium v" + ver + " — Initializing");
         LOGGER.info(" Client-side performance suite for Minecraft 1.21.11");
-        LOGGER.info(" Minecraft 1.21.11 | Fabric | Java 25+");
+        LOGGER.info(" Minecraft 1.21.11 | Fabric | " + destiny.renderer.system.SystemDispatcher.getActiveSystem().systemName() + " (" + destiny.renderer.system.SystemDispatcher.getActiveSystem().systemFolder() + ")");
         LOGGER.info(" Built by Destiny073");
         LOGGER.info("======================================================");
 
@@ -75,6 +82,10 @@ public final class DestinyRenderer implements ClientModInitializer {
             : Path.of("config");
         RendererConfig.load(configDir);
         LOGGER.info("[Caesium] Configuration loaded.");
+
+        // Boost main thread priority and initialize Compact Sine LUT for peak FPS
+        destiny.renderer.util.ThreadPriorityOptimizer.boostMainThread();
+        destiny.renderer.math.CompactSineLUT.init();
 
         destiny.renderer.rpc.DiscordPresenceManager.start();
 
@@ -117,6 +128,56 @@ public final class DestinyRenderer implements ClientModInitializer {
                     client.setScreen(new destiny.renderer.gui.DestinySettingsScreen(null));
                 }
             }
+        });
+
+        // Drive deferred chunk rebuild processing on render cadence (every rendered frame)
+        net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents.END_MAIN.register(context -> {
+            destiny.renderer.hud.CaesiumFrameProfiler.beginChunkScheduling();
+            destiny.renderer.chunk.DeferredRebuildQueue.processFrame();
+            destiny.renderer.hud.CaesiumFrameProfiler.endChunkScheduling();
+        });
+
+        // Dynamic worker resizing and server thread priority for Singleplayer vs Multiplayer
+        net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            boolean singleplayer = client.getServer() != null;
+            if (singleplayer) {
+                destiny.renderer.scheduler.ThreadPriorityManager.optimizeServerThread(client.getServer().getThread());
+            }
+            int targetMeshingThreads = RendererConfig.get().resolvedMeshingThreads(singleplayer);
+            if (destiny.renderer.chunk.MeshingJobSystem.get() != null) {
+                destiny.renderer.chunk.MeshingJobSystem.get().updateWorkerCount(targetMeshingThreads);
+            }
+            caesium.integration.CaesiumIntegration.updateWorkerLimits(singleplayer);
+        });
+
+        // Comprehensive world state and VRAM cleanup on disconnect
+        net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
+            int targetMeshingThreads = RendererConfig.get().resolvedMeshingThreads(false);
+            if (destiny.renderer.chunk.MeshingJobSystem.get() != null) {
+                destiny.renderer.chunk.MeshingJobSystem.get().updateWorkerCount(targetMeshingThreads);
+            }
+            caesium.integration.CaesiumIntegration.updateWorkerLimits(false);
+            caesium.integration.CaesiumIntegration.resetWorld();
+            destiny.renderer.cull.EntityOcclusionCuller.clear();
+            destiny.renderer.cull.BlockEntityOcclusionCuller.clear();
+            destiny.renderer.blockentity.BlockEntityOptimizationRegistry.clear();
+            destiny.renderer.render.SpriteVisibilityTracker.clear();
+            destiny.renderer.chunk.DeferredRebuildQueue.clear();
+            destiny.renderer.chunk.MeshingJobSystem.clear();
+        });
+
+        // Immediate cleanup of section meshes and tracking when chunks unload
+        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents.CHUNK_UNLOAD.register((world, chunk) -> {
+            long cx = chunk.getPos().x;
+            long cz = chunk.getPos().z;
+            caesium.integration.CaesiumIntegration.unloadChunk(cx, cz);
+            destiny.renderer.blockentity.BlockEntityOptimizationRegistry.invalidateChunk(cx, cz);
+            destiny.renderer.render.SpriteVisibilityTracker.invalidateChunk(cx, cz);
+        });
+
+        // Optimize integrated server thread priority as soon as it begins starting
+        net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents.SERVER_STARTING.register(server -> {
+            destiny.renderer.scheduler.ThreadPriorityManager.optimizeServerThread(server.getThread());
         });
 
         // Stop worker threads at JVM exit. GL resources are NOT released here — the GL
@@ -197,6 +258,7 @@ public final class DestinyRenderer implements ClientModInitializer {
             // cause of the frame time collapse while moving.
             // ----------------------------------------------------------------
             if (destiny.renderer.compat.WorkAllotment.ownsTerrain()) {
+                destiny.renderer.system.SystemDispatcher.initialize();
                 RendererArenaManager.initialize();
 
                 MeshingJobSystem.initialize();
@@ -269,6 +331,11 @@ public final class DestinyRenderer implements ClientModInitializer {
         // Queued sections belong to the old renderer instance; holding them would leak
         // and rebuilding them would touch freed state.
         destiny.renderer.chunk.DeferredRebuildQueue.clear();
+        destiny.renderer.blockentity.BlockEntityOptimizationRegistry.clear();
+        destiny.renderer.cull.BlockEntityOcclusionCuller.clear();
+        destiny.renderer.cull.EntityOcclusionCuller.clear();
+        destiny.renderer.chunk.MeshingJobSystem.clear();
+        caesium.integration.CaesiumIntegration.resetWorld();
         // Previously this only logged, so every stale allocation survived a reload and
         // leaked buffer space until the ring allocator wrapped over live geometry.
         if (activeBackend != null) {
@@ -324,7 +391,7 @@ public final class DestinyRenderer implements ClientModInitializer {
         safeShutdown("backend",     () -> { if (activeBackend         != null) activeBackend.shutdown(); });
         safeShutdown("entityBatch", () -> { if (entityBatchRenderer   != null) entityBatchRenderer.shutdown(); });
         safeShutdown("fenceLimiter", destiny.renderer.render.CpuRenderAheadLimiter::releaseAll);
-        safeShutdown("arenas",      RendererArenaManager::shutdown);
+        safeShutdown("arenas",      () -> { RendererArenaManager.shutdown(); destiny.renderer.system.SystemDispatcher.shutdown(); });
         safeShutdown("engine",      caesium.integration.CaesiumIntegration::stop);
 
         LOGGER.info("[Caesium] Shutdown complete.");

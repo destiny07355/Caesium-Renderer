@@ -99,19 +99,22 @@ public final class ChunkSectionData {
 
                     BlockState state = world.getBlockState(mutable);
                     int stateId = net.minecraft.block.Block.getRawIdFromState(state);
-                    blockStateIds[morton] = stateId;
+                    if (stateId == 0 || state.isAir()) {
+                        blockStateIds[morton] = 0;
+                        opacityFlags[morton]  = 0;
+                        tintIndices[morton]   = 0;
+                        lightLevels[morton]   = 0;
+                    } else {
+                        blockStateIds[morton] = stateId;
+                        opacityFlags[morton]  = BlockStateLUT.isOpaqueCube(stateId) ? (byte) 1 : (byte) 0;
+                        tintIndices[morton]   = BlockStateLUT.tintOf(stateId);
 
-                    // Both of these come from precomputed tables now. They used to do a
-                    // registry lookup plus a chain of String.contains per block — 5832
-                    // times per section, in the hottest loop in the engine.
-                    opacityFlags[morton] = BlockStateLUT.isOpaqueCube(stateId) ? (byte) 1 : (byte) 0;
-                    tintIndices[morton]  = BlockStateLUT.tintOf(stateId);
-
-                    // Light
-                    int blockLight = world.getLuminance(mutable);
-                    int skyLight   = world.getLightLevel(
-                        net.minecraft.world.LightType.SKY, mutable);
-                    lightLevels[morton] = (byte) ((skyLight << 4) | (blockLight & 0xF));
+                        // Light query only required for actual geometry
+                        int blockLight = world.getLuminance(mutable);
+                        int skyLight   = world.getLightLevel(
+                            net.minecraft.world.LightType.SKY, mutable);
+                        lightLevels[morton] = (byte) ((skyLight << 4) | (blockLight & 0xF));
+                    }
                 }
             }
         }

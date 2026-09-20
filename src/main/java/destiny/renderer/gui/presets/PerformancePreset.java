@@ -66,10 +66,9 @@ public enum PerformancePreset {
             case LOW_END_IGPU -> {
                 cfg.greedyMeshing = true;
                 cfg.deferChunkUpdates = true;
-                cfg.maxChunkUpdatesPerFrame = 6;
+                cfg.maxChunkUpdatesPerFrame = 48;
                 cfg.chunkWorkerPriority = 0; // Low
                 cfg.smartChunkLoading = true;
-                cfg.adaptiveViewDistance = true;
                 cfg.cpuRenderAhead = 2;
 
                 if (opts != null) {
@@ -87,10 +86,9 @@ public enum PerformancePreset {
             case BALANCED -> {
                 cfg.greedyMeshing = true;
                 cfg.deferChunkUpdates = true;
-                cfg.maxChunkUpdatesPerFrame = 12;
+                cfg.maxChunkUpdatesPerFrame = 32;
                 cfg.chunkWorkerPriority = 0;
                 cfg.smartChunkLoading = true;
-                cfg.adaptiveViewDistance = false;
                 cfg.cpuRenderAhead = 2;
 
                 if (opts != null) {
@@ -108,10 +106,9 @@ public enum PerformancePreset {
             case COMPETITIVE_240HZ -> {
                 cfg.greedyMeshing = true;
                 cfg.deferChunkUpdates = true;
-                cfg.maxChunkUpdatesPerFrame = 16;
+                cfg.maxChunkUpdatesPerFrame = 48;
                 cfg.chunkWorkerPriority = 1; // Normal
                 cfg.smartChunkLoading = true;
-                cfg.adaptiveViewDistance = false;
                 cfg.cpuRenderAhead = 1; // Minimum input lag
 
                 if (opts != null) {
@@ -129,10 +126,9 @@ public enum PerformancePreset {
             case CINEMATIC_ULTRA -> {
                 cfg.greedyMeshing = true;
                 cfg.deferChunkUpdates = true;
-                cfg.maxChunkUpdatesPerFrame = 24;
+                cfg.maxChunkUpdatesPerFrame = 64;
                 cfg.chunkWorkerPriority = 1;
                 cfg.smartChunkLoading = true;
-                cfg.adaptiveViewDistance = false;
                 cfg.cpuRenderAhead = 2;
 
                 if (opts != null) {

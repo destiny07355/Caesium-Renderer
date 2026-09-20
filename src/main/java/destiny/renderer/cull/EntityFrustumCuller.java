@@ -1,5 +1,6 @@
 package destiny.renderer.cull;
 
+import destiny.renderer.config.RendererConfig;
 import net.minecraft.entity.Entity;
 import net.minecraft.util.math.Box;
 
@@ -9,7 +10,7 @@ import net.minecraft.util.math.Box;
 public final class EntityFrustumCuller {
 
     private static final FrustumCuller FRUSTUM = new FrustumCuller();
-    private static final double ANIMATION_LOD_DIST_SQ = 48.0 * 48.0; // 48 blocks
+    private static double animationLodDistSq = 24.0 * 24.0;
 
     private static double cameraX = 0.0;
     private static double cameraY = 0.0;
@@ -23,6 +24,10 @@ public final class EntityFrustumCuller {
         cameraX = camX;
         cameraY = camY;
         cameraZ = camZ;
+
+        int lod = RendererConfig.get().entityLODDistance;
+        double dist = lod > 0 ? (double) lod : 24.0;
+        animationLodDistSq = dist * dist;
     }
 
     /**
@@ -58,6 +63,6 @@ public final class EntityFrustumCuller {
         double dx = entity.getX() - cameraX;
         double dy = entity.getY() - cameraY;
         double dz = entity.getZ() - cameraZ;
-        return (dx * dx + dy * dy + dz * dz) > ANIMATION_LOD_DIST_SQ;
+        return (dx * dx + dy * dy + dz * dz) > animationLodDistSq;
     }
 }

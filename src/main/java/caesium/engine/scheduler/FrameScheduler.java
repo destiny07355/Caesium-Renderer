@@ -62,22 +62,26 @@ public final class FrameScheduler {
     public void beginFrame(FrameInput input) {
         EngineStatus status = device.status();
         status.recordFrameStarted(input.deltaMillis());
-        for (FrameInput.Explosion explosion : input.explosions()) {
-            responder.onEvent(new DeltaCommand.Explosion(
+        java.util.List<FrameInput.Explosion> explosions = input.explosions();
+        int explosionCount = explosions.size();
+        for (int i = 0; i < explosionCount; i++) {
+            FrameInput.Explosion explosion = explosions.get(i);
+            responder.onExplosion(
                     explosion.x(), explosion.y(), explosion.z(),
-                    explosion.radius(), explosion.timeMs()));
+                    explosion.radius(), explosion.timeMs());
         }
     }
 
     /** Executes the compiled graph into the device's frame-in-flight slot. */
     public void execute(FrameInput input) {
         long start = System.nanoTime();
-        GraphCompiler.CompiledGraph compiled = graph.compile();
+        RenderPass[] order = graph.activeOrder();
 
         FrameContext frame = device.beginFrame();
         GpuCommandEncoder encoder = frame.encoder();
         encoder.begin();
-        for (RenderPass pass : compiled.order()) {
+        for (int i = 0; i < order.length; i++) {
+            RenderPass pass = order[i];
             if (!pass.hasWork(frame)) {
                 continue; // pass culling
             }

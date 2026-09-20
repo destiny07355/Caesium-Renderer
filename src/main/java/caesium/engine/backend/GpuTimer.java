@@ -18,6 +18,11 @@ public interface GpuTimer {
      */
     long elapsedNanos();
 
+    /** Non-blocking read; returns 0 while the result is unavailable. */
+    default long tryElapsedNanos() {
+        return elapsedNanos();
+    }
+
     /** Releases backend resources. Idempotent. */
     void destroy();
 }

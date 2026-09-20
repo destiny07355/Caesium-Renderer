@@ -58,6 +58,13 @@ public final class HeadlessGlTest {
             check(renderer != null && version != null,
                     "GL context up: " + version + " on " + renderer);
 
+            while (GL33.glGetError() != GL33.GL_NO_ERROR) {
+                // Clear unrelated context-creation errors before testing the detector.
+            }
+            destiny.renderer.hardware.HardwareCapabilityDetector.detect();
+            check(GL33.glGetError() == GL33.GL_NO_ERROR,
+                    "hardware capability detection leaves OpenGL error state clean");
+
             GpuBackend backend = new OpenGLBackend();
             CaesiumEngine engine = new CaesiumEngine(backend, 2, 2);
             engine.graph().addPass(new TestQuadPass(backend));

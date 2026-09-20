@@ -13,6 +13,9 @@ public sealed interface DeltaCommand {
     record SectionMeshUpdated(RenderWorld.SectionMesh mesh) implements DeltaCommand {
     }
 
+    record LayeredSectionMeshUpdated(RenderWorld.LayeredSectionMesh mesh) implements DeltaCommand {
+    }
+
     record EntityUpdated(long id, float x, float y, float z) implements DeltaCommand {
     }
 

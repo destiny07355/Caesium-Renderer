@@ -137,6 +137,9 @@ public final class RendererConfig {
      */
     public boolean replaceVideoSettings = true;
 
+    /** Toggle between Simple Menu and Advanced Menu in the settings GUI. */
+    public boolean advancedMenu = false;
+
     // --- Core rendering ---
     /** Maximum chunk render distance in chunks. */
     public int renderDistance = 16;
@@ -209,6 +212,9 @@ public final class RendererConfig {
 
     /** Cull distant or occluded armor stands. */
     public boolean cullArmorStands = true;
+
+    /** True Optimized Block Entities (OBE): statically bake resting chests, signs, beds, bells into the terrain mesh. */
+    public boolean optimizeBlockEntities = true;
 
     // --- Sodium Extra Animations ---
     public boolean enableWaterAnim = true;
@@ -474,7 +480,7 @@ public final class RendererConfig {
     public volatile boolean deferChunkUpdates = true;
 
     /** Maximum chunk rebuilds started per frame when deferral is enabled. */
-    public int maxChunkUpdatesPerFrame = 8;
+    public int maxChunkUpdatesPerFrame = 32;
 
     /**
      * Blocks around the player inside which section rebuilds are never deferred.
@@ -737,7 +743,7 @@ public final class RendererConfig {
         maxExplosionParticles     = clamp(maxExplosionParticles, 0, 2000);
         unfocusedFpsLimit         = clamp(unfocusedFpsLimit, 0, 260);
         cpuRenderAhead            = clamp(cpuRenderAhead, 0, 5);
-        maxChunkUpdatesPerFrame   = clamp(maxChunkUpdatesPerFrame, 1, 64);
+        maxChunkUpdatesPerFrame   = clamp(maxChunkUpdatesPerFrame, 1, 128);
         nearRebuildRadius         = clamp(nearRebuildRadius, 0, 128);
         chunkWorkerPriority       = clamp(chunkWorkerPriority, 0, 2);
         mainMenuFpsLimit          = clamp(mainMenuFpsLimit, 0, 260);
@@ -834,20 +840,24 @@ public final class RendererConfig {
      *
      * @return resolved meshing thread count, always at least 1
      */
+    public boolean firstOpenTutorialShown = false;
+    public boolean showCaesiumProfiler = false;
+    public boolean caesiumProfilerFullMode = false;
+    public boolean enableAllToasts = true;
+    public boolean enableAdvancementToasts = true;
+    public boolean enableTutorialToasts = false;
+
     public int resolvedMeshingThreads() {
-        int base;
+        return resolvedMeshingThreads(false);
+    }
+
+    public int resolvedMeshingThreads(boolean singleplayer) {
         if (meshingThreads <= 0) {
             int cores = Runtime.getRuntime().availableProcessors();
-            if (cores <= 4) {
-                base = Math.max(1, cores - 1); // 1 free core on dual/quad core
-            } else if (cores <= 12) {
-                base = cores - 2; // 2 free cores on 6-12 logical cores (general use + Discord)
-            } else {
-                base = cores - 4; // 4 free cores on 12+ logical cores (streaming, recording, OS)
-            }
-            // Apply the allotment-aware shrink only on the auto path.
-            int shrunk = Math.max(1, Math.round(base * destiny.renderer.compat.ResourceShare.meshingThreadFactor()));
-            return shrunk;
+            int optimal = singleplayer
+                ? (cores >= 8 ? 4 : (cores >= 4 ? 2 : 1))
+                : Math.max(2, Math.min(8, cores - 2));
+            return Math.max(1, Math.round(optimal * destiny.renderer.compat.ResourceShare.meshingThreadFactor()));
         }
         return meshingThreads;
     }

@@ -59,7 +59,7 @@ public final class CaesiumParticlePolicy {
         }
 
         if (cfg.disableAllParticles) {
-            return GAMEPLAY_CRITICAL.contains(type);
+            return false;
         }
 
         if (!ParticleClassifier.isEnabled(effect, cfg)) {
@@ -67,11 +67,13 @@ public final class CaesiumParticlePolicy {
         }
 
         MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc == null || mc.player == null) return true;
+        if (mc == null) return true;
+        var player = mc.player;
+        if (player == null) return true;
 
-        double dx = mc.player.getX() - x;
-        double dy = mc.player.getY() - y;
-        double dz = mc.player.getZ() - z;
+        double dx = player.getX() - x;
+        double dy = player.getY() - y;
+        double dz = player.getZ() - z;
         double distSq = dx * dx + dy * dy + dz * dz;
 
         int cullDist = cfg.particleCullDistance;

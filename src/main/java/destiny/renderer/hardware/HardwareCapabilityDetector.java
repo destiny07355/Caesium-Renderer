@@ -2,8 +2,11 @@ package destiny.renderer.hardware;
 
 import org.lwjgl.opengl.GL;
 import org.lwjgl.opengl.GL11;
+import org.lwjgl.opengl.GL30;
 import org.lwjgl.opengl.GLCapabilities;
 
+import java.util.HashSet;
+import java.util.Set;
 import java.util.logging.Logger;
 
 /**
@@ -83,7 +86,7 @@ public final class HardwareCapabilityDetector {
 
         // ---- Extension check ----
         GLCapabilities caps = GL.getCapabilities();
-        String glExtensions = GL11.glGetString(GL11.GL_EXTENSIONS);
+        Set<String> glExtensions = readExtensions(version);
         hasMultiDrawIndirect = caps.GL_ARB_multi_draw_indirect || (version != null && glVersionAtLeast(version, 4, 3));
         hasMeshShaders       = hasExtension(glExtensions, EXT_MESH_SHADER);
         hasBindlessTextures  = hasExtension(glExtensions, ARB_BINDLESS_TEXTURE);
@@ -103,7 +106,7 @@ public final class HardwareCapabilityDetector {
         LOGGER.info("[Caesium] CPU Cores (logical): " + cpuCores);
 
         // ---- Profile assignment ----
-        boolean isIGPU = detectIGPU(gpuRenderer, estimatedVramMB);
+        boolean isIGPU = detectIGPU(gpuVendor, gpuRenderer, estimatedVramMB);
         if (isIGPU) {
             profile = HardwareProfile.IGPU_ZERO_COPY;
         } else if (hasMeshShaders) {
@@ -129,9 +132,10 @@ public final class HardwareCapabilityDetector {
      * Determines whether the GPU is an integrated unit. Uses VRAM threshold combined
      * with renderer string heuristics for known iGPU families.
      */
-    private static boolean detectIGPU(String renderer, int vramMB) {
+    static boolean detectIGPU(String vendor, String renderer, int vramMB) {
         if (renderer == null) return false;
-        String r = renderer.toLowerCase();
+        String r = normalizeGpuName(renderer);
+        String v = normalizeGpuName(vendor);
         // Known iGPU identifiers
         if (r.contains("iris xe") || r.contains("intel uhd") || r.contains("intel hd")
             || r.contains("radeon vega") || r.contains("rx vega")
@@ -139,6 +143,7 @@ public final class HardwareCapabilityDetector {
             || r.contains("swiftshader")) {
             return true;
         }
+        if (v.contains("intel") && !r.contains("arc")) return true;
         // Fallback: very low VRAM is a strong iGPU indicator
         return vramMB > 0 && vramMB < 1024;
     }
@@ -147,7 +152,7 @@ public final class HardwareCapabilityDetector {
      * Estimates VRAM using vendor-specific GL extensions, falling back to a renderer
      * string parse and finally a safe default.
      */
-    private static int estimateVRAM(String extensionsStr) {
+    private static int estimateVRAM(Set<String> extensionsStr) {
         // NVIDIA: GL_NVX_gpu_memory_info
         if (hasExtension(extensionsStr, NVX_GPU_MEMORY_INFO)) {
             int kb = GL11.glGetInteger(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX);
@@ -178,21 +183,44 @@ public final class HardwareCapabilityDetector {
         }
 
         // Safe fallback — assume mid-range discrete
-        return 4096;
-    }
-    
-    private static boolean hasExtension(String extensions, String ext) {
-        return extensions != null && extensions.contains(ext);
+        return 0;
     }
 
-    /** Checks if an OpenGL extension is available in the current context. */
-    private static boolean isExtensionPresent(String ext) {
-        try {
-            return GL.getCapabilities() != null && GL11.glGetString(GL11.GL_EXTENSIONS) != null
-                   && GL11.glGetString(GL11.GL_EXTENSIONS).contains(ext);
-        } catch (Exception e) {
-            return false;
+    static String normalizeGpuName(String value) {
+        if (value == null) return "";
+        return value.toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", " ")
+                .trim()
+                .replaceAll("\\s+", " ");
+    }
+    
+    private static boolean hasExtension(Set<String> extensions, String ext) {
+        return extensions.contains(ext);
+    }
+
+    /** Reads extensions without the invalid legacy query in an OpenGL core profile. */
+    private static Set<String> readExtensions(String version) {
+        Set<String> extensions = new HashSet<>();
+        if (version != null && glVersionAtLeast(version, 3, 0)) {
+            int count = GL11.glGetInteger(GL30.GL_NUM_EXTENSIONS);
+            for (int i = 0; i < count; i++) {
+                String extension = GL30.glGetStringi(GL11.GL_EXTENSIONS, i);
+                if (extension != null) {
+                    extensions.add(extension);
+                }
+            }
+            return extensions;
         }
+
+        String legacy = GL11.glGetString(GL11.GL_EXTENSIONS);
+        if (legacy != null && !legacy.isBlank()) {
+            for (String extension : legacy.split(" ")) {
+                if (!extension.isEmpty()) {
+                    extensions.add(extension);
+                }
+            }
+        }
+        return extensions;
     }
 
     /** Parses "X.Y.Z ..." version strings and tests if major.minor ≥ reqMajor.reqMinor. */

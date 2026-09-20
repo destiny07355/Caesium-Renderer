@@ -33,6 +33,9 @@ public interface GpuCommandEncoder {
 
     void drawIndexed(int indexCount, int instanceCount);
 
+    /** Executes tightly packed DrawIndexedIndirect commands from an INDIRECT buffer. */
+    void drawIndexedIndirect(GpuBuffer commands, int offset, int drawCount, int stride);
+
     void copyBuffer(GpuBuffer src, int srcOffset, GpuBuffer dst, int dstOffset, int size);
 
     /**
@@ -52,6 +55,8 @@ public interface GpuCommandEncoder {
         /** Position (2 floats), color (4 floats) — used by the debug/test quad. */
         POS_COLOR_2F_4F,
         /** Position (3 floats), color (4 floats) — used by 3D section-mesh geometry. */
-        POS_COLOR_3F_4F
+        POS_COLOR_3F_4F,
+        /** Baked terrain: xyz, uv, RGBA8, packed light, and signed-normal bytes (32 bytes). */
+        TERRAIN_BAKED
     }
 }

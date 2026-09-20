@@ -142,6 +142,7 @@ final class OffscreenTarget implements RenderTarget {
     private long pipelineLayout;
     private long pipeline;
     private long terrainPipeline;
+    private long bakedTerrainPipeline;
     private long descriptorPool;
     private long descriptorSet;
     private long setLayout;
@@ -394,11 +395,18 @@ final class OffscreenTarget implements RenderTarget {
 
     @Override
     public GpuPipeline pipeline(GpuCommandEncoder.VertexLayout layout) {
+        if (layout == GpuCommandEncoder.VertexLayout.TERRAIN_BAKED) {
+            if (bakedTerrainPipeline == 0L) {
+                bakedTerrainPipeline = VulkanPipelineFactory.createForLayout(device, renderPass,
+                        pipelineLayout, setLayout, width, height, layout);
+            }
+            return new Pipeline(bakedTerrainPipeline);
+        }
         if (layout == GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F) {
             if (terrainPipeline == 0L) {
                 terrainPipeline = VulkanPipelineFactory.createForLayout(device, renderPass,
                         pipelineLayout, setLayout, width, height,
-                        GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F);
+                        layout);
                 if (terrainPipeline == 0L) {
                     throw new IllegalStateException("Caesium: terrain pipeline creation failed");
                 }
@@ -555,6 +563,10 @@ final class OffscreenTarget implements RenderTarget {
         if (terrainPipeline != 0L) {
             VK10.vkDestroyPipeline(device, terrainPipeline, null);
             terrainPipeline = 0L;
+        }
+        if (bakedTerrainPipeline != 0L) {
+            VK10.vkDestroyPipeline(device, bakedTerrainPipeline, null);
+            bakedTerrainPipeline = 0L;
         }
         if (pipelineLayout != 0L) {
             VK10.vkDestroyPipelineLayout(device, pipelineLayout, null);

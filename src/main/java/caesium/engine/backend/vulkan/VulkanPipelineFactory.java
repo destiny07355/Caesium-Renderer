@@ -37,6 +37,9 @@ import static org.lwjgl.vulkan.VK10.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32B32A32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32B32_SFLOAT;
 import static org.lwjgl.vulkan.VK10.VK_FORMAT_R32G32_SFLOAT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_R32_UINT;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_SNORM;
+import static org.lwjgl.vulkan.VK10.VK_FORMAT_R8G8B8A8_UNORM;
 import static org.lwjgl.vulkan.VK10.VK_FRONT_FACE_COUNTER_CLOCKWISE;
 import static org.lwjgl.vulkan.VK10.VK_NULL_HANDLE;
 import static org.lwjgl.vulkan.VK10.VK_POLYGON_MODE_FILL;
@@ -99,6 +102,23 @@ final class VulkanPipelineFactory {
             }
             """;
 
+    private static final String BAKED_TERRAIN_VERT_SRC = """
+            #version 450
+            layout(location = 0) in vec3 aPos;
+            layout(location = 1) in vec2 aUv;
+            layout(location = 2) in vec4 aColor;
+            layout(location = 3) in uint aLight;
+            layout(location = 4) in vec4 aNormal;
+            layout(std140, set = 0, binding = 0) uniform Uniforms { mat4 uMVP; vec4 uTint; };
+            layout(location = 0) out vec4 vColor;
+            void main() {
+                float blockLight = float(aLight & 255u) / 240.0;
+                float skyLight = float((aLight >> 16u) & 255u) / 240.0;
+                vColor = aColor * max(0.1, max(blockLight, skyLight));
+                gl_Position = uMVP * vec4(aPos, 1.0);
+            }
+            """;
+
     private static final String FRAG_SRC = """
             #version 450
             layout(std140, set = 0, binding = 0) uniform Uniforms {
@@ -116,13 +136,16 @@ final class VulkanPipelineFactory {
     }
 
     private static String vertexShader(GpuCommandEncoder.VertexLayout layout) {
-        return layout == GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F
-                ? TERRAIN_VERT_SRC : VERT_SRC;
+        return switch (layout) {
+            case POS_COLOR_3F_4F -> TERRAIN_VERT_SRC;
+            case TERRAIN_BAKED -> BAKED_TERRAIN_VERT_SRC;
+            default -> VERT_SRC;
+        };
     }
 
     private static int cullMode(GpuCommandEncoder.VertexLayout layout) {
         // Back-face culling for solid terrain; the debug quad keeps both faces visible.
-        return layout == GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F
+        return layout != GpuCommandEncoder.VertexLayout.POS_COLOR_2F_4F
                 ? org.lwjgl.vulkan.VK10.VK_CULL_MODE_BACK_BIT
                 : VK_CULL_MODE_NONE;
     }
@@ -243,7 +266,15 @@ final class VulkanPipelineFactory {
             VkVertexInputBindingDescription.Buffer bindings =
                     VkVertexInputBindingDescription.callocStack(1, stack);
             VkVertexInputAttributeDescription.Buffer attributes;
-            if (vertexLayout == GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F) {
+            if (vertexLayout == GpuCommandEncoder.VertexLayout.TERRAIN_BAKED) {
+                bindings.get(0).binding(0).stride(32).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+                attributes = VkVertexInputAttributeDescription.callocStack(5, stack);
+                attributes.get(0).location(0).binding(0).format(VK_FORMAT_R32G32B32_SFLOAT).offset(0);
+                attributes.get(1).location(1).binding(0).format(VK_FORMAT_R32G32_SFLOAT).offset(12);
+                attributes.get(2).location(2).binding(0).format(VK_FORMAT_R8G8B8A8_UNORM).offset(20);
+                attributes.get(3).location(3).binding(0).format(VK_FORMAT_R32_UINT).offset(24);
+                attributes.get(4).location(4).binding(0).format(VK_FORMAT_R8G8B8A8_SNORM).offset(28);
+            } else if (vertexLayout == GpuCommandEncoder.VertexLayout.POS_COLOR_3F_4F) {
                 bindings.get(0).binding(0).stride(28).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
                 attributes = VkVertexInputAttributeDescription.callocStack(2, stack);
                 attributes.get(0)

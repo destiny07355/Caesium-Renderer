@@ -1,69 +1,71 @@
-# Project: DestinyRenderer
+# Caesium — Project Overview
 
-## Architecture
-DestinyRenderer is a high-performance GPU-driven Minecraft 1.21.11 (Fabric / Yarn mappings) rendering mod optimized for integrated graphics (specifically Intel UHD Graphics).
-Key components:
-1. **Chunk Meshing & Upload Engine**: Thread-local zero-allocation meshers, greedy quad merging, spiral priority queue, frame budget throttle (≤ 2.5ms upload), neighbor dependency graph.
-2. **GPU Batching & Indirect Draw Pipeline**: Multi-Draw Indirect (MDI), 128^3 spatial hierarchy culling, persistent command buffer, CPU frustum/occlusion culling, distance translucency sorting.
-3. **Memory Allocator & Pool System**: Slab/pool allocation for chunk VBOs/IBOs, free-list recycling, persistent coherent buffer mapping (zero-copy), separate VBO pools for Opaque, Cutout, Translucent, Entity, Particle.
-4. **Shader Pipeline & Presets**: Intel UHD compatible GLSL shaders (`#version 330 core`), 3 presets (Performance, Balanced, Quality), smooth AO, soft shadows, volumetric fog hints, FXAA pass.
-5. **Entity, Particle & PvP Renderer**: Instanced mob draw batching, entity distance AO LOD, particle VBO pools, NBT caching, frame-start chunk upload processing for zero-latency PvP.
-6. **Startup & World Join**: Inner-ring spiral priority loading, async palette snapshot, retry-with-backoff for top-height chunk section population.
-7. **Config Screen**: Option GUI compatible with GUI scales 1x-4x, visual preset selector, drag-only sliders, 7 particle toggles.
+## Scope
 
-## Milestones
-| # | Name | Scope | Dependencies | Status |
-|---|------|-------|-------------|--------|
-| M1 | Research & Gap Analysis Report | Read Sodium, VulkanMod, Lithium, ImmediatelyFast, Iris, DR code; produce gap report | none | IN_PROGRESS |
-| M2 | Chunk Meshing & Upload Pipeline | Spiral queue, upload budget throttling, greedy meshing, section graph, zero-alloc meshers | M1 | PLANNED |
-| M3 | GPU Batching & Draw Call Reduction | MDI pipeline, frustum/occlusion culling, 128^3 hierarchy, translucency sort, fix ExplosionOptimizationMixin | M1, M2 | PLANNED |
-| M4 | Memory Layout & Buffer Allocations | Slab/pool allocator, free-list recycling, coherent buffers, separate pools | M2 | PLANNED |
-| M5 | Shader Quality & Visual Presets | Performance/Balanced/Quality shaders (#version 330 core), FXAA, smooth AO, fog | M3 | PLANNED |
-| M6 | Entity, Particle & PvP Rendering | Mob instancing, entity AO LOD, particle VBO pools, NBT caching, frame-start upload processing | M3, M4 | PLANNED |
-| M7 | Startup & World Join Speed | Spiral initial load, async palette snapshot, ConcurrentModificationException retry | M2 | PLANNED |
-| M8 | Config Screen Polish | Presets GUI, setting controls, 1x-4x GUI scale, drag-only sliders, particle toggles | M5 | PLANNED |
-| M9 | Final E2E Test Pass & Benchmarks | E2E test verification, 60s superflat benchmark, benchmark_results.txt, Victory Audit | M1-M8 | PLANNED |
+Caesium is a **client-side Minecraft 1.21.11 Fabric performance and rendering engine**. Its current development line is `2.0.5` and its baseline runtime is **Java 21+**.
 
-## Interface Contracts
-### RenderEngine ↔ ChunkManager
-- `enqueueSectionUpdate(BlockPos pos)`: Enqueues section and flags neighbors for graph update.
-- `processUploadQueue(long maxTimeNanos)`: Uploads completed chunk meshes respecting maximum frame time budget (default 2.5ms).
+The project focuses on frame-time consistency, chunk processing, render-thread pressure, memory behavior, visibility work, particles, block entities, and hardware-aware scheduling.
 
-### MemoryPool ↔ MeshUploader
-- `allocateSlice(PassType pass, int byteSize)`: Returns a `BufferSlice` from the slab allocator.
-- `freeSlice(BufferSlice slice)`: Recycler returns slice to pool free-list immediately.
+## Current Subsystems
 
-### ShaderManager ↔ RenderPipeline
-- `applyPreset(PresetLevel preset)`: Rebinds shaders and uniform configurations for Performance / Balanced / Quality modes.
+| Subsystem | Responsibility |
+| --- | --- |
+| Frame scheduler | Controls background work from frame pressure and available budget |
+| Meshing job system | Prioritizes, executes, retries, cancels, and discards section work |
+| Section extraction | Converts Minecraft section data into renderer-owned mesh data |
+| Completion pipeline | Moves finished worker results into bounded render-thread integration |
+| GPU upload ring | Applies bounded time/byte upload budgets and synchronization |
+| Scene / section storage | Tracks renderer-owned world state and section lifecycle |
+| Visibility | Frustum, distance, and conservative occlusion decisions |
+| Block entity optimization | Static/dynamic ownership with safe fallback and invalidation |
+| Particle policy | Admission, category, distance, and workload controls |
+| Telemetry | Frame, meshing, upload, culling, and queue measurements |
+| Configuration | Categorized client settings and compatibility controls |
 
-## Code Layout
+## Work Priorities
+
+Chunk work is classified by urgency:
+
+```text
+CRITICAL    frame-critical rendering work
+VISIBLE     missing or outdated visible geometry
+PREDICTIVE  geometry likely to become visible soon
+MAINTENANCE cleanup, compaction, and low-priority work
 ```
-src/main/java/destinyrenderer/
-├── DestinyRenderer.java
-├── client/
-│   ├── DestinyRendererClient.java
-│   ├── render/
-│   │   ├── chunk/
-│   │   │   ├── ChunkMesher.java
-│   │   │   ├── ChunkUploadQueue.java
-│   │   │   ├── SectionGraph.java
-│   │   │   └── GreedyMesher.java
-│   │   ├── batch/
-│   │   │   ├── MultiDrawIndirectPipeline.java
-│   │   │   ├── SpatialHierarchy.java
-│   │   │   └── FrustumCuller.java
-│   │   ├── memory/
-│   │   │   ├── SlabAllocator.java
-│   │   │   └── CoherentBuffer.java
-│   │   ├── shader/
-│   │   │   ├── ShaderPreset.java
-│   │   │   └── ShaderManager.java
-│   │   ├── entity/
-│   │   │   ├── EntityBatchRenderer.java
-│   │   │   └── ParticlePoolManager.java
-│   │   └── gui/
-│   │       └── DestinyConfigScreen.java
-│   └── mixin/
-│       ├── ExplosionOptimizationMixin.java
-│       └── ...
+
+The scheduler protects frame delivery first, then spends remaining CPU/GPU budget on useful background work.
+
+## Current Engineering Target
+
+The renderer is stable in current gameplay testing. The remaining observed issue is **slow chunk throughput in both multiplayer and single-player**.
+
+The next optimization pass is limited to the chunk-to-visible pipeline:
+
+```text
+chunk available
+    -> rebuild admission
+    -> queue wait
+    -> extraction / meshing
+    -> completion queue
+    -> render-thread integration
+    -> GPU upload
+    -> visible section
 ```
+
+Changes should increase throughput only when measurements show spare capacity. Existing bounds, revision checks, world-generation checks, retry limits, and stale-result rejection must remain intact.
+
+## Supported Platform
+
+- Minecraft `1.21.11`
+- Fabric
+- Client side
+- Java `21+`
+- OpenGL
+
+NeoForge, Vulkan, or other loader/backend support is not part of the supported public surface unless a tested implementation is present in the current source tree.
+
+## Validation Rule
+
+A performance change is accepted only when it produces a reproducible improvement in at least one relevant metric without introducing visual, lifecycle, or frame-pacing regressions.
+
+Useful metrics include average FPS, 1%/0.1% lows, worst-frame time, chunk-to-visible latency, meshes per second, queue age, integration wait, upload wait, and memory growth.
