@@ -1,3 +1,5 @@
+Also, uhh i forgot to say that there are a lot of options right now in the config im thinking on changing the configuration menu for simple and advanced two seperate 
+---
 # Caesium
 
 **Caesium** is a client-side performance and rendering engine for **Minecraft 1.21.11** on **Fabric**, built around stable frame times, efficient chunk processing, low allocation pressure, and predictable behavior under heavy load.
